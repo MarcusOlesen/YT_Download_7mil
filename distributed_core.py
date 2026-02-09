@@ -593,13 +593,16 @@ def download_one(video_id, videos_dir, logs_dir, test_mode):
     }
 
 
-def release_videos_to_pending(conn, worker_id, ids):
+def release_videos_to_pending(conn, worker_id, ids, decrement_attempts=True):
     if not ids:
         return 0
+    attempts_expr = (
+        "GREATEST(attempts - 1, 0)" if decrement_attempts else "attempts"
+    )
     with conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 UPDATE videos
                 SET status = 'pending',
                     worker_id = NULL,
@@ -609,7 +612,7 @@ def release_videos_to_pending(conn, worker_id, ids):
                     start_time = NULL,
                     end_time = NULL,
                     elapsed_sec = NULL,
-                    attempts = GREATEST(attempts - 1, 0)
+                    attempts = {attempts_expr}
                 WHERE worker_id = %s AND id = ANY(%s)
                 """,
                 (worker_id, ids),
@@ -618,7 +621,13 @@ def release_videos_to_pending(conn, worker_id, ids):
 
 
 def release_blocked_video(conn, worker_id, video_id):
-    return release_videos_to_pending(conn, worker_id, [video_id])
+    return release_videos_to_pending(
+        conn,
+        worker_id,
+        [video_id],
+        decrement_attempts=False,
+    )
+
 
 def update_video_result(conn, worker_id, result):
     with conn:
@@ -738,4 +747,7 @@ def next_batch_id(run_dir, worker_id, prefix=""):
             os.unlink(temp_path)
     prefix_str = f"_{prefix}" if prefix else ""
     return f"{worker_id}{prefix_str}_{counter:05d}"
+
+
+
 
