@@ -3,6 +3,13 @@ import os
 
 import psycopg2
 
+# Hardcode dataset totals to avoid reading the datasets table.
+DATASET_TOTALS = [
+    ("ids_ok_sorted", 5727606),
+    ("ids_no_uploadinfo", 1768),
+    ("ids_with_errors", 1264355),
+]
+
 
 def connect_db(db_url):
     conn = psycopg2.connect(db_url)
@@ -33,20 +40,30 @@ def fetch_status_counts(conn):
     return counts
 
 
-def fetch_dataset_progress(conn):
+def fetch_dataset_totals(conn):
+    if DATASET_TOTALS:
+        return [(name, idx, total) for idx, (name, total) in enumerate(DATASET_TOTALS)]
     with conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT d.name, d.priority, d.total_count,
-                   SUM(CASE WHEN v.status IN ('success','failure','skipped') THEN 1 ELSE 0 END) AS done
-            FROM datasets d
-            LEFT JOIN videos v ON v.dataset_name = d.name
-            GROUP BY d.name, d.priority, d.total_count
-            ORDER BY d.priority ASC
-            """
+            "SELECT name, priority, total_count FROM datasets ORDER BY priority ASC"
         )
         rows = cur.fetchall()
     return rows
+
+
+def fetch_dataset_done(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT dataset_name,
+                   SUM(CASE WHEN status IN ('success','failure','skipped')
+                            THEN 1 ELSE 0 END) AS done
+            FROM videos
+            GROUP BY dataset_name
+            """
+        )
+        rows = cur.fetchall()
+    return {row[0]: int(row[1] or 0) for row in rows}
 
 
 def fetch_active_workers(conn):
@@ -68,8 +85,7 @@ def fetch_recent_batches(conn, limit):
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT batch_id, worker_id, status, created_at, finished_at,
-                   success, failure, skipped, zip_path
+            SELECT batch_id, worker_id, status, created_at, finished_at, total, last_error
             FROM batches
             ORDER BY created_at DESC
             LIMIT %s
@@ -78,6 +94,36 @@ def fetch_recent_batches(conn, limit):
         )
         rows = cur.fetchall()
     return rows
+
+
+def fetch_batch_counts(conn, batch_ids):
+    if not batch_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT batch_id, status, COUNT(*)
+            FROM videos
+            WHERE batch_id = ANY(%s)
+            GROUP BY batch_id, status
+            """,
+            (batch_ids,),
+        )
+        rows = cur.fetchall()
+    counts = {}
+    for batch_id, status, count in rows:
+        bucket = counts.setdefault(
+            batch_id,
+            {
+                "pending": 0,
+                "in_progress": 0,
+                "success": 0,
+                "failure": 0,
+                "skipped": 0,
+            },
+        )
+        bucket[status] = count
+    return counts
 
 
 def parse_args():
@@ -110,14 +156,16 @@ def main():
     total = sum(counts.values())
     done = counts["success"] + counts["failure"] + counts["skipped"]
     remaining = max(0, total - done)
+    overall_pct = (done / total * 100.0) if total else 0.0
 
     print("Distributed status")
     print(f"Total videos: {total}")
     print(
-        "Done: {done} | Remaining: {remaining} | "
+        "Done: {done} ({pct:.2f}%) | Remaining: {remaining} | "
         "In progress: {in_progress} | Pending: {pending}"
         .format(
             done=done,
+            pct=overall_pct,
             remaining=remaining,
             in_progress=counts["in_progress"],
             pending=counts["pending"],
@@ -132,10 +180,15 @@ def main():
         )
     )
 
-    print("Datasets:")
-    for name, _, total_count, done_count in fetch_dataset_progress(conn):
-        done_count = int(done_count or 0)
-        print(f" {name}: \t{done_count}/{total_count}")
+    totals = fetch_dataset_totals(conn)
+    done_map = fetch_dataset_done(conn)
+    if totals:
+        print("Datasets:")
+        for name, _, total_count in totals:
+            total_count = int(total_count or 0)
+            done_count = int(done_map.get(name, 0))
+            pct = (done_count / total_count * 100.0) if total_count else 0.0
+            print(f" {name}: \t{done_count}/{total_count} ({pct:.2f}%)")
 
     workers = fetch_active_workers(conn)
     if workers:
@@ -148,8 +201,20 @@ def main():
     recent = fetch_recent_batches(conn, args.tail)
     if recent:
         print("Recent batches:")
+        batch_ids = [row[0] for row in recent]
+        counts_by_batch = fetch_batch_counts(conn, batch_ids)
         for row in recent:
-            batch_id, worker_id, status, _, _, success, failure, skipped, zip_path = row
+            batch_id, worker_id, status, _, _, total_count, last_error = row
+            counts = counts_by_batch.get(
+                batch_id,
+                {
+                    "pending": 0,
+                    "in_progress": 0,
+                    "success": 0,
+                    "failure": 0,
+                    "skipped": 0,
+                },
+            )
             print(
                 " {batch_id}: \tworker={worker} status={status} success={success} "
                 "failure={failure} skipped={skipped}"
@@ -157,17 +222,17 @@ def main():
                     batch_id=batch_id,
                     worker=worker_id,
                     status=status,
-                    success=success,
-                    failure=failure,
-                    skipped=skipped,
-                    zip_path=zip_path,
+                    success=counts["success"],
+                    failure=counts["failure"],
+                    skipped=counts["skipped"],
                 )
             )
 
     conn.close()
 
-    # divider 
-    print("="*75)
+    # divider
+    print("=" * 75)
 
 if __name__ == "__main__":
     main()
+
