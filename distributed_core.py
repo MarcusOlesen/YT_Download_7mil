@@ -1,6 +1,8 @@
 import os
+import re
 import shutil
 import tempfile
+from pathlib import Path
 import time
 import traceback
 from datetime import datetime, timezone
@@ -21,6 +23,49 @@ DEFAULT_DATASETS = [
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def strip_ansi(text):
+    if not text:
+        return text
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def last_non_empty_line(text):
+    if not text:
+        return ""
+    for line in reversed(text.splitlines()):
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def is_bot_blocked_log(ytdlp_log):
+    log_text = ytdlp_log or ""
+    if isinstance(log_text, str) and os.path.exists(log_text):
+        try:
+            log_text = Path(log_text).read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            log_text = ""
+    line = last_non_empty_line(strip_ansi(log_text))
+    if not line:
+        return False
+    # Normalize common apostrophe encodings
+    line = line.replace("’", "'").replace("‘", "'")
+    line = line.replace("???", "'").replace("???", "'")
+    line = line.replace("�", "'")
+    template = (
+        "ERROR: [youtube] {id}: Sign in to confirm you're not a bot. "
+        "Use --cookies-from-browser or --cookies for the authentication. "
+        "See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  "
+        "for how to manually pass cookies. Also see  "
+        "https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies  "
+        "for tips on effectively exporting YouTube cookies"
+    )
+    escaped = re.escape(template)
+    escaped = escaped.replace(re.escape("{id}"), r"[A-Za-z0-9_-]{11}")
+    pattern = re.compile(r"^" + escaped + r"$")
+    return bool(pattern.match(line))
 
 
 def atomic_write_text(text, path):
@@ -523,8 +568,12 @@ def download_one(video_id, videos_dir, logs_dir, test_mode):
         status, error, ytdlp_log = download_video(
             video_id, videos_dir, test=test_mode
         )
+        if is_bot_blocked_log(ytdlp_log):
+            status = "blocked"
+            error = None
+            ytdlp_log = None
         output_file = find_existing_video(videos_dir, video_id)
-        if status != "success" and ytdlp_log:
+        if status != "success" and status != "blocked" and ytdlp_log:
             log_path = os.path.join(logs_dir, f"{video_id}.log")
             atomic_write_text(ytdlp_log, log_path)
     except Exception as exc:
@@ -543,6 +592,33 @@ def download_one(video_id, videos_dir, logs_dir, test_mode):
         "log_path": log_path,
     }
 
+
+def release_videos_to_pending(conn, worker_id, ids):
+    if not ids:
+        return 0
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE videos
+                SET status = 'pending',
+                    worker_id = NULL,
+                    lease_until = NULL,
+                    batch_id = NULL,
+                    last_error = NULL,
+                    start_time = NULL,
+                    end_time = NULL,
+                    elapsed_sec = NULL,
+                    attempts = GREATEST(attempts - 1, 0)
+                WHERE worker_id = %s AND id = ANY(%s)
+                """,
+                (worker_id, ids),
+            )
+            return cur.rowcount
+
+
+def release_blocked_video(conn, worker_id, video_id):
+    return release_videos_to_pending(conn, worker_id, [video_id])
 
 def update_video_result(conn, worker_id, result):
     with conn:
@@ -662,5 +738,4 @@ def next_batch_id(run_dir, worker_id, prefix=""):
             os.unlink(temp_path)
     prefix_str = f"_{prefix}" if prefix else ""
     return f"{worker_id}{prefix_str}_{counter:05d}"
-
 

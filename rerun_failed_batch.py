@@ -1,10 +1,12 @@
 import argparse
+import json
 import os
-import shutil
 import socket
 import threading
+import time
+import tempfile
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timezone
 
 from scraper_utils import check_dependencies
@@ -12,6 +14,7 @@ from scraper_utils import check_dependencies
 from distributed_core import (
     build_existing_map,
     claim_failed_from_batch,
+    claim_videos,
     connect_db,
     create_batch_record,
     create_run,
@@ -23,6 +26,8 @@ from distributed_core import (
     get_meta,
     log_run_event,
     record_run_error,
+    release_blocked_video,
+    release_videos_to_pending,
     update_batch_status,
     update_video_result,
     next_batch_id,
@@ -77,6 +82,18 @@ def parse_args():
         action="store_true",
         help="Skip downloads (yt-dlp test mode).",
     )
+    parser.add_argument(
+        "--block-threshold",
+        type=int,
+        default=20,
+        help="Consecutive bot blocks before pausing.",
+    )
+    parser.add_argument(
+        "--block-sleep-seconds",
+        type=int,
+        default=900,
+        help="Sleep duration after bot block threshold.",
+    )
     return parser.parse_args()
 
 
@@ -96,6 +113,42 @@ def resolve_worker_id(run_dir, worker_id_arg):
     with open(path, "w", encoding="utf-8") as f:
         f.write(value + "\n")
     return value
+
+
+
+
+def load_block_state(run_dir, default_wait_seconds):
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, "block_wait_state.json")
+    state = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                state = json.load(f) or {}
+        except Exception:
+            state = {}
+    base_wait = int(state.get("base_wait_seconds", default_wait_seconds))
+    next_wait = int(state.get("next_wait_seconds", base_wait))
+    state["base_wait_seconds"] = max(1, base_wait)
+    state["next_wait_seconds"] = max(1, next_wait)
+    state["path"] = path
+    return state
+
+
+def save_block_state(state):
+    path = state.get("path")
+    if not path:
+        return
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump({k: v for k, v in state.items() if k != "path"}, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def compute_lease_heartbeat_interval(lease_seconds):
@@ -132,6 +185,107 @@ def start_lease_heartbeat(
     thread = threading.Thread(target=_loop, daemon=True)
     thread.start()
     return stop_event, thread
+
+
+def log_event(db_url, run_id, level, message):
+    conn = connect_db(db_url)
+    log_run_event(conn, run_id, level, message)
+    conn.close()
+
+
+def probe_until_clear(db_url, worker_id, lease_seconds, max_attempts, run_id, args):
+    probe_batch_id = f"probe_{worker_id}"
+    state = load_block_state(args.run_dir, args.block_sleep_seconds)
+    current_wait = state.get("next_wait_seconds", args.block_sleep_seconds)
+
+    while True:
+        state["last_wait_started_at"] = utc_now()
+        save_block_state(state)
+        log_event(
+            db_url,
+            run_id,
+            "info",
+            f"Bot-check sleep for {current_wait}s before probing.",
+        )
+        time.sleep(current_wait)
+        state["last_wait_ended_at"] = utc_now()
+        state["last_wait_seconds"] = int(current_wait)
+        save_block_state(state)
+
+        while True:
+            conn = connect_db(db_url)
+            ids = claim_videos(
+                conn,
+                worker_id,
+                probe_batch_id,
+                1,
+                False,
+                lease_seconds,
+                max_attempts,
+            )
+            conn.close()
+
+            if not ids:
+                log_event(
+                    db_url,
+                    run_id,
+                    "warn",
+                    "Probe: no pending videos to test; sleeping again.",
+                )
+                current_wait = max(1, int(current_wait * 1.5))
+                state["next_wait_seconds"] = current_wait
+                save_block_state(state)
+                break
+
+            video_id = ids[0]
+            probe_dir = os.path.join(args.run_dir, "probe")
+            probe_logs = os.path.join(args.run_dir, "probe_logs")
+            os.makedirs(probe_dir, exist_ok=True)
+            os.makedirs(probe_logs, exist_ok=True)
+            result = download_one(video_id, probe_dir, probe_logs, False)
+
+            if result["status"] == "blocked":
+                conn = connect_db(db_url)
+                release_blocked_video(conn, worker_id, video_id)
+                conn.close()
+                log_event(
+                    db_url,
+                    run_id,
+                    "warn",
+                    "Probe: bot-check still active; sleeping again.",
+                )
+                current_wait = max(1, int(current_wait * 1.5))
+                state["next_wait_seconds"] = current_wait
+                save_block_state(state)
+                break
+
+            if result["status"] == "success" and result.get("output_file"):
+                conn = connect_db(db_url)
+                update_video_result(conn, worker_id, result)
+                conn.close()
+                next_base = max(1, int(current_wait * 0.8))
+                state["base_wait_seconds"] = next_base
+                state["next_wait_seconds"] = next_base
+                save_block_state(state)
+                log_event(
+                    db_url,
+                    run_id,
+                    "info",
+                    f"Probe success; resuming downloads. Next base wait={next_base}s.",
+                )
+                return
+
+            # Non-bot error: record and try another probe video immediately
+            conn = connect_db(db_url)
+            update_video_result(conn, worker_id, result)
+            conn.close()
+            log_event(
+                db_url,
+                run_id,
+                "warn",
+                f"Probe non-bot error for {video_id}; trying another video.",
+            )
+            time.sleep(1)
 
 
 def main():
@@ -207,14 +361,7 @@ def main():
 
         if not ids:
             print(f"No failed videos to retry for batch {args.batch_id}.")
-            conn = connect_db(db_url)
-            log_run_event(
-                conn,
-                run_id,
-                "info",
-                f"No failed videos to retry for batch {args.batch_id}.",
-            )
-            conn.close()
+            log_event(db_url, run_id, "info", f"No failed videos to retry for batch {args.batch_id}.")
             return
 
         conn = connect_db(db_url)
@@ -230,22 +377,12 @@ def main():
             heartbeat_interval,
             run_id,
         )
-        conn = connect_db(db_url)
-        log_run_event(
-            conn,
-            run_id,
-            "info",
-            f"Lease heartbeat every {heartbeat_interval}s for batch {batch_id}.",
-        )
-        conn.close()
+        log_event(db_url, run_id, "info", f"Lease heartbeat every {heartbeat_interval}s for batch {batch_id}.")
 
+        blocked_triggered = False
+        consecutive_blocked = 0
         try:
-            batches_dir = os.path.join(args.run_dir, "batches")
-            zips_dir = os.path.join(args.run_dir, "zips")
-            os.makedirs(batches_dir, exist_ok=True)
-            os.makedirs(zips_dir, exist_ok=True)
-
-            batch_dir = os.path.join(batches_dir, batch_id)
+            batch_dir = os.path.join(args.run_dir, "batches", batch_id)
             videos_dir = os.path.join(batch_dir, "videos")
             logs_dir = os.path.join(batch_dir, "logs")
             os.makedirs(videos_dir, exist_ok=True)
@@ -273,39 +410,88 @@ def main():
                     continue
                 ids_to_download.append(video_id)
 
-            if ids_to_download:
-                with ThreadPoolExecutor(max_workers=args.workers) as pool:
-                    futures = {
-                        pool.submit(
-                            download_one,
-                            video_id,
-                            videos_dir,
-                            logs_dir,
-                            args.test_mode,
-                        ): video_id
-                        for video_id in ids_to_download
-                    }
-                    for future in as_completed(futures):
+            started_ids = set()
+            in_flight = {}
+            iterator = iter(ids_to_download)
+
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                for _ in range(args.workers):
+                    try:
+                        vid = next(iterator)
+                    except StopIteration:
+                        break
+                    future = pool.submit(
+                        download_one,
+                        vid,
+                        videos_dir,
+                        logs_dir,
+                        args.test_mode,
+                    )
+                    in_flight[future] = vid
+                    started_ids.add(vid)
+
+                while in_flight:
+                    done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        vid = in_flight.pop(future)
                         result = future.result()
-                        conn = connect_db(db_url)
-                        update_video_result(conn, args.worker_id, result)
-                        conn.close()
+
+                        if result["status"] == "blocked":
+                            consecutive_blocked += 1
+                            conn = connect_db(db_url)
+                            release_blocked_video(conn, args.worker_id, vid)
+                            conn.close()
+                            log_event(db_url, run_id, "warn", f"Bot-check detected for {vid} (streak {consecutive_blocked}).")
+                        else:
+                            consecutive_blocked = 0
+                            conn = connect_db(db_url)
+                            update_video_result(conn, args.worker_id, result)
+                            conn.close()
+
+                        if not blocked_triggered and consecutive_blocked >= args.block_threshold:
+                            blocked_triggered = True
+                            log_event(db_url, run_id, "error", f"Bot-check threshold reached ({args.block_threshold}). Pausing batch {batch_id}.")
+
+                        if not blocked_triggered:
+                            try:
+                                vid = next(iterator)
+                            except StopIteration:
+                                continue
+                            future = pool.submit(
+                                download_one,
+                                vid,
+                                videos_dir,
+                                logs_dir,
+                                args.test_mode,
+                            )
+                            in_flight[future] = vid
+                            started_ids.add(vid)
+
+            if blocked_triggered:
+                not_started = [vid for vid in ids_to_download if vid not in started_ids]
+                if not_started:
+                    conn = connect_db(db_url)
+                    release_videos_to_pending(conn, args.worker_id, not_started)
+                    conn.close()
+
         finally:
             stop_event.set()
             heartbeat_thread.join(timeout=10)
 
         conn = connect_db(db_url)
         counts = get_batch_counts(conn, batch_id)
+        status_value = "paused" if blocked_triggered else "downloaded"
+        last_error = "bot_check_threshold" if blocked_triggered else None
         update_batch_status(
             conn,
             batch_id,
             {
-                "status": "downloaded",
+                "status": status_value,
                 "finished_at": utc_now(),
                 "success": counts.get("success", 0),
                 "failure": counts.get("failure", 0),
                 "skipped": counts.get("skipped", 0),
-                "last_error": None,
+                "last_error": last_error,
             },
         )
         conn.close()
@@ -314,15 +500,23 @@ def main():
             f"{batch_id} done: success={counts.get('success', 0)} "
             f"failure={counts.get('failure', 0)} skipped={counts.get('skipped', 0)}"
         )
-        conn = connect_db(db_url)
-        log_run_event(
-            conn,
+        log_event(
+            db_url,
             run_id,
             "info",
             f"Retry batch {batch_id} done: success={counts.get('success', 0)} "
             f"failure={counts.get('failure', 0)} skipped={counts.get('skipped', 0)}",
         )
-        conn.close()
+
+        if blocked_triggered:
+            probe_until_clear(
+                db_url,
+                args.worker_id,
+                args.lease_seconds,
+                args.max_attempts,
+                run_id,
+                args,
+            )
 
     except KeyboardInterrupt:
         run_status = "interrupted"
