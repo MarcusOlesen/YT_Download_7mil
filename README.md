@@ -198,6 +198,29 @@ Keep local zips / files after archiving:
 python start_archiver.py --run-dir download_run_workerA --archive-dir "archive" --keep-batch-dir --keep-local-zip
 ```
 
+## Bot-check handling (YouTube verification)
+
+The worker detects the specific YouTube bot-check error and treats it as **temporary**:
+- The video is released back to `pending` (attempts are not counted).
+- No error log file is written for that video.
+- A circuit breaker pauses the batch after consecutive bot-checks.
+
+New worker flags:
+- `--block-threshold` (default 20): consecutive bot-checks before pausing
+- `--block-sleep-seconds` (default 900): initial sleep before probing again
+
+Dynamic backoff:
+- Each time the worker sleeps due to bot-check, the wait increases by **1.5?**.
+- When a probe **successfully downloads** a video, the next base wait becomes **0.8?** the last wait.
+- The wait state is persisted in `block_wait_state.json` inside the `--run-dir`.
+
+Probe behavior:
+- If the probe hits bot-check ? sleep again.
+- If the probe hits a non-bot error ? try another video immediately.
+- Resume full downloads **only** after a successful probe download.
+
+You can inspect the run logs to see bot-check events and sleep durations.
+
 ## Re-run failed batch
 
 Retry only the failed videos from a specific batch ID. This creates a new
