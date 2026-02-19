@@ -5,7 +5,9 @@ import os
 import sys
 
 import psycopg2
+from env_utils import load_env
 
+load_env()
 
 def connect_db(db_url):
     conn = psycopg2.connect(db_url)

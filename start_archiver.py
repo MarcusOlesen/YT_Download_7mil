@@ -11,7 +11,9 @@ from distributed_core import (
     validate_archive_dir,
     utc_now,
 )
+from env_utils import load_env
 
+load_env()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Start an archiver worker.")

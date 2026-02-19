@@ -6,7 +6,9 @@ from distributed_core import (
     connect_db,
     init_db,
 )
+from env_utils import load_env
 
+load_env()
 
 def parse_args():
     parser = argparse.ArgumentParser(

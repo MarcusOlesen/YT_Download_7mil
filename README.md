@@ -92,11 +92,6 @@ Verify `pg_dump` is available:
 pg_dump --version
 ```
 
-I had to manually add it to my PATH on Windows:
-```powershell
-setx PATH "$env:PATH;C:\Program Files\PostgreSQL\18\bin"
-```
-
 If you move the Parquet files elsewhere, pass custom paths:
 
 ```powershell
@@ -105,7 +100,7 @@ python create_database.py --ids-ok path\to\ids_ok_sorted.parquet `
   --ids-errors path\to\ids_with_errors.parquet
 ```
 
-5) Install a JavaScript runtime/engine could be dino   or node.js. To install dino on Windows, run:
+5) Install a JavaScript runtime/engine could be dino or node.js. To install dino on Windows, run:
   
 ```powershell
 irm https://deno.land/install.ps1 | iex
@@ -119,10 +114,15 @@ python -c "from scraper_utils import check_dependencies; check_dependencies()"
 
 ## Initialize the database (run once)
 
+Optionally, create a `.env` file in the repo root so you don't have to set `DATABASE_URL` every time:
+
+```text
+DATABASE_URL=postgresql://postgres.aoepfpqehsefxlytotub:[YOUR-PASSWORD]@aws-1-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require
+```
+
 Set `DATABASE_URL` (or pass `--db-url`) and load IDs into Postgres:
 
 ```powershell
-$env:DATABASE_URL="postgresql://postgres:YouTube@localhost:5432/yt_downloads"
 python create_database.py --batch-size 1000
 ```
 
@@ -136,7 +136,6 @@ This deletes all downloader tables and state from the database. Use only
 if you want a clean slate. The script asks for multiple confirmations.
 
 ```powershell
-$env:DATABASE_URL="postgresql://postgres:YouTube@localhost/yt_downloads"
 python reset_database.py
 ```
 
@@ -150,7 +149,6 @@ timestamped backups and keeps the newest 3 files (current + two older). When
 old dumps, then sleeps for `--interval-minutes`.
 
 ```powershell
-$env:DATABASE_URL="postgresql://postgres:YouTube@localhost:5432/yt_downloads"
 python host_database.py --backup-dir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup" --interval-minutes 60 --reap
 ```
 
@@ -172,7 +170,6 @@ You can change `--batch-size` between runs; only new batches use the new size,
 and the DB metadata is updated automatically. This should only be done if necessary. 
 
 ```powershell
-$env:DATABASE_URL="postgresql://postgres:YouTube@localhost:5432/yt_downloads"
 python start_download.py --workers 8
 ```
 

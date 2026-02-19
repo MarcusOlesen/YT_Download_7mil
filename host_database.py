@@ -7,7 +7,9 @@ import time
 from datetime import datetime, timezone
 
 from distributed_core import connect_db, reap_expired_leases
+from env_utils import load_env
 
+load_env()
 
 def parse_args():
     parser = argparse.ArgumentParser(

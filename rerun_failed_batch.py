@@ -33,7 +33,9 @@ from distributed_core import (
     next_batch_id,
     utc_now,
 )
+from env_utils import load_env
 
+load_env()
 
 def parse_args():
     parser = argparse.ArgumentParser(

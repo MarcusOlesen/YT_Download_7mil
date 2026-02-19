@@ -2,7 +2,9 @@ import argparse
 import os
 
 import psycopg2
+from env_utils import load_env
 
+load_env()
 
 def parse_args():
     parser = argparse.ArgumentParser(

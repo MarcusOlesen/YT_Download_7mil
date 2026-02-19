@@ -8,7 +8,9 @@ import time
 import psycopg2
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from env_utils import load_env
 
+load_env()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB_URL = os.getenv(

@@ -4,3 +4,5 @@ data/
 example/
 __pycache__/
 database_info.txt
+test.ipynb
+.env

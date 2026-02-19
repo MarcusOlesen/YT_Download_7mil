@@ -2,6 +2,9 @@ import argparse
 import os
 
 import psycopg2
+from env_utils import load_env
+
+load_env()
 
 # Hardcode dataset totals to avoid reading the datasets table.
 DATASET_TOTALS = [
