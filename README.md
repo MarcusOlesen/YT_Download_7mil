@@ -1,4 +1,4 @@
-﻿# YouTube Distributed Downloader
+# YouTube Distributed Downloader
 
 Distributed YouTube downloader coordinated by a shared Postgres database.
 
@@ -29,7 +29,7 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require
 - `start_download.py`: primary downloader worker.
 - `rerun_failed_batch.py`: retry failed videos from one batch.
 - `get_status.py`: quick progress overview.
-- `host_database.py`: optional lease reaper + timestamped DB backups.
+- `backup_and_reap.py`: optional lease reaper + timestamped DB backups.
 - `reset_database.py`: destructive reset of downloader tables.
 - `start_archiver.py`: optional zip/archive worker (not required for downloading).
 - `dashboard.py`: local dashboard (work in progress).
@@ -154,6 +154,25 @@ python rerun_failed_batch.py --batch-id BATCH_ID --run-dir "D:\yt_download_worke
 
 This creates a retry batch and processes only entries that currently have `status='failure'` in the source batch.
 
+## Backup and Reap
+Reap expired leases + save backups (up to 3) every `--interval-minutes`:
+
+```powershell
+python backup_and_reap.py --backup-dir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup" --interval-minutes 60 --reap
+```
+
+One-time backup:
+
+```powershell
+python backup_and_reap.py --backup-dir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup" --once
+```
+
+One-time reap:
+
+```powershell
+python backup_and_reap.py --reap
+```
+
 ## Status and monitoring
 
 Quick status snapshot:
@@ -162,17 +181,7 @@ Quick status snapshot:
 python get_status.py
 ```
 
-Optional host-side maintenance (reap expired leases + backups):
-
-```powershell
-python host_database.py --backup-dir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup" --interval-minutes 60 --reap
-```
-
-One-time backup:
-
-```powershell
-python host_database.py --backup-dir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup" --once
-```
+Eventually this could be made as a nice overview in the dashboard script but for now this is a WIP
 
 ## Utility scripts
 
@@ -501,6 +510,7 @@ Use only when you need to wipe downloader state and start over.
 ## Notes
 
 - Keep `DATABASE_URL` valid in `.env` on every machine that runs scripts.
-- Use `host_database.py --reap` (or another scheduled process) so expired leases are reclaimed.
+- Use `backup_and_reap.py --reap` (or another scheduled process) so expired leases are reclaimed.
 - Avoid sharing a single `--run-dir` across multiple machines.
 - Archive flow is optional; downloader does not require it.
+
