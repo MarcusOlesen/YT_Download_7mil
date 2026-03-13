@@ -571,9 +571,8 @@ def download_one(video_id, videos_dir, logs_dir, test_mode):
         if is_bot_blocked_log(ytdlp_log):
             status = "blocked"
             error = None
-            ytdlp_log = None
         output_file = find_existing_video(videos_dir, video_id)
-        if status != "success" and status != "blocked" and ytdlp_log:
+        if status != "success" and ytdlp_log:
             log_path = os.path.join(logs_dir, f"{video_id}.log")
             atomic_write_text(ytdlp_log, log_path)
     except Exception as exc:

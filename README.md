@@ -1,51 +1,40 @@
-# YouTube Distributed Downloader
+﻿# YouTube Distributed Downloader
 
-This folder contains a distributed, batch-based YouTube downloader for very
-large ID lists. It uses a shared Postgres database to coordinate work across
-multiple machines and avoid duplicate downloads.
+Distributed YouTube downloader coordinated by a shared Postgres database.
 
-## What it does
+This project is designed for large ID lists and multi-machine execution. The database is the single source of truth, so workers can run in parallel without downloading the same video twice.
 
-- Reads video IDs from three Parquet files in priority order.
-- Loads all IDs into Postgres once (init step).
-- Workers claim batches atomically and download in parallel.
-- Each worker writes local batch folders/zips and can be stopped/restarted safely.
-- Run history and error logs are stored in the DB for auditing.
+## Core idea
 
-## Design overview
+- Store all target video IDs in Postgres once.
+- Workers claim work atomically and download locally.
+- Progress, retries, and failures are tracked centrally.
+- Workers are resumable and safe to restart.
 
-- A single Postgres database is the source of truth for all workers.
-- Each worker claims IDs using transactional locks, so no two workers download
-  the same video.
-- Leases prevent permanent lockups if a worker crashes; expired leases are
-  reclaimed.
-- Local output lives on each worker under its `--run-dir`.
+## Database hosting
 
-## Files and layout
+The current deployment hosts Postgres on **UCloud**, but any reachable Postgres instance works.
 
-- `create_database.py` - initialize the Postgres schema and load IDs (run once).
-- `reset_database.py` - destructive full reset (drops all downloader tables).
-- `host_database.py` - monitoring + timestamped backups (run on DB host).
-- `start_download.py` - worker process (run on each download machine).
-- `rerun_failed_batch.py` - retry failed videos from a specific batch.
-- `get_status.py` - status summary (Postgres).
-- `utilities/get_video_info.py` - lookup video status/paths/logs by ID.
-- `utilities/get_run_report.py` - report run history and error logs.
-- `start_archiver.py` - archive local zips to a shared archive folder.
-- `dashboard.py` - (WIP) web dashboard to start/stop host and workers, view status. 
-- `distributed_core.py` - shared logic used by the scripts above.
-- `scraper_utils.py` - download helpers.
-- `data/ids_ok_sorted.parquet`, `data/ids_no_uploadinfo.parquet`,
-  `data/ids_with_errors.parquet` are the input ID lists.
+Important: create a `.env` file in the repository root with a valid `DATABASE_URL`. All scripts default to this variable unless `--db-url` is provided.
 
-First data-file has highest priority and contains IDs where we have metadata sorted by upload date.
-Second data-file has IDs with metadata but no upload info. Third data-file has IDs that previously had errors when trying to get metadata.
+Example:
 
-During a run, each worker writes under its local run directory, for example:
+```text
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require
+```
 
-- `download_run_workerA/batches/WORKER_BATCH_ID/`
-- `download_run_workerA/zips/WORKER_BATCH_ID.zip`
+## Project layout
 
+- `create_database.py`: creates schema and loads IDs from parquet files.
+- `start_download.py`: primary downloader worker.
+- `rerun_failed_batch.py`: retry failed videos from one batch.
+- `get_status.py`: quick progress overview.
+- `host_database.py`: optional lease reaper + timestamped DB backups.
+- `reset_database.py`: destructive reset of downloader tables.
+- `start_archiver.py`: optional zip/archive worker (not required for downloading).
+- `dashboard.py`: local dashboard (work in progress).
+- `utilities/get_video_info.py`: inspect DB state for specific IDs.
+- `utilities/get_run_report.py`: inspect run history and logs.
 ## Setup
 
 1) Install Python 3.10+.
@@ -110,43 +99,70 @@ Check dependencies:
 
 ```powershell
 python -c "from scraper_utils import check_dependencies; check_dependencies()"
-``` 
-
+```
 ## Initialize the database (run once)
 
-Optionally, create a `.env` file in the repo root so you don't have to set `DATABASE_URL` every time:
-
-```text
-DATABASE_URL=postgresql://postgres.aoepfpqehsefxlytotub:[YOUR-PASSWORD]@aws-1-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require
-```
-
-Set `DATABASE_URL` (or pass `--db-url`) and load IDs into Postgres:
+With `.env` in place, initialize tables and load IDs:
 
 ```powershell
 python create_database.py --batch-size 1000
 ```
 
-Notes:
-- Run this once per database. Re-running will fail if the videos table is already populated.
-- If you need to reinitialize from scratch, create a new empty database.
-
-## Reset database (destructive)
-
-This deletes all downloader tables and state from the database. Use only
-if you want a clean slate. The script asks for multiple confirmations.
+You can override input parquet paths if needed:
 
 ```powershell
-python reset_database.py
+python create_database.py --ids-ok path\to\ids_ok_sorted.parquet `
+  --ids-no-upload path\to\ids_no_uploadinfo.parquet `
+  --ids-errors path\to\ids_with_errors.parquet
 ```
 
-After this, run `create_database.py` again to reload IDs.
+## Run downloads
 
-## Host monitoring + backups
+`--run-dir` is required. Set it explicitly for each worker machine, for example on `D:\`.
 
-Run this on the database host (or anywhere with `pg_dump` access). It creates
-timestamped backups and keeps the newest 3 files (current + two older). When
-`--reap` is enabled, each loop reclaims expired leases, runs a backup, rotates
-old dumps, then sleeps for `--interval-minutes`.
+Single worker example:
+
+```powershell
+python start_download.py --run-dir "D:\yt_download_worker_a" --workers 8
+```
+
+Legacy sequential behavior:
+
+```powershell
+python start_download.py --run-dir "D:\yt_download_worker_a" --workers 8 --overlap-batches 1
+```
+
+Recommended multi-machine practice:
+
+- Use a unique `--worker-id` per machine (or let each machine persist one in its own run dir).
+- Use a unique `--run-dir` per machine.
+- Keep all workers pointed to the same Postgres database.
+
+What goes into `--run-dir`:
+
+- `worker_id.txt`
+- `block_wait_state.json`
+- `batches/<batch_id>/videos`
+- `batches/<batch_id>/logs`
+- `probe/` and `probe_logs/` when bot-check probing is active
+
+## Retry failed videos from a batch
+
+```powershell
+python rerun_failed_batch.py --batch-id BATCH_ID --run-dir "D:\yt_download_worker_a" --workers 8
+```
+
+This creates a retry batch and processes only entries that currently have `status='failure'` in the source batch.
+
+## Status and monitoring
+
+Quick status snapshot:
+
+```powershell
+python get_status.py
+```
+
+Optional host-side maintenance (reap expired leases + backups):
 
 ```powershell
 python host_database.py --backup-dir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup" --interval-minutes 60 --reap
@@ -158,136 +174,333 @@ One-time backup:
 python host_database.py --backup-dir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup" --once
 ```
 
-Tips:
-- Use Windows Task Scheduler to run `host_database.py` at boot or on a schedule.
-- Keep backups on a different drive or network share.
+## Utility scripts
 
-## Run workers
+Run these from the repository root using module form:
 
-Each machine should use a unique `--worker-id` and its own local `--run-dir`:
-
-You can change `--batch-size` between runs; only new batches use the new size,
-and the DB metadata is updated automatically. This should only be done if necessary. 
+1. `utilities.get_video_info` - inspect DB status, paths, attempts, errors, and batch linkage for one or many IDs.
 
 ```powershell
-python start_download.py --workers 8
+python -m utilities.get_video_info --id VIDEO_ID
+python -m utilities.get_video_info --ids "id1,id2,id3" --format json
+python -m utilities.get_video_info --ids-file ids.txt --format csv --out info.csv
 ```
 
-If you omit `--worker-id`, a unique ID is generated and stored in `worker_id.txt`
-inside the `--run-dir` folder, and reused on future runs. If you pass
-`--worker-id`, it is written to `worker_id.txt` so the same name is reused
-automatically next time.
-
-Batch IDs are sequential per worker: `workerA_00001`, `workerA_00002`, etc.
-Retry batches use `workerA_retry_00001`. If you want shorter batch names,
-choose a shorter `--worker-id`.
-
-## Run archiver
-Zip batch folders created by workers and copy the zips to a shared archive (local zips are deleted by default):
+2. `utilities.get_run_report` - inspect recent runs or logs for one specific run ID.
 
 ```powershell
-python start_archiver.py --run-dir download_run_workerA --archive-dir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\archive"
+python -m utilities.get_run_report --tail 10
+python -m utilities.get_run_report --run-id RUN_ID --log-tail 100
 ```
 
-Keep local zips / files after archiving:
+## Start UCloud Database
+
+To run the central Postgres database we use a persistent storage folder on **UCloud** and start PostgreSQL automatically using an initialization script. This job should be running 24/7.
+
+### Prerequisites
+
+Before starting the database job you must:
+
+* Have an **SSH key registered in UCloud**
+* Have access to the shared folder:
+
+```
+/SDU_data/youtubeDB
+```
+
+This folder contains the database files and the initialization script.
+
+
+
+### Start the database job
+
+1. Open **UCloud** and start a new **Ubuntu job**.
+
+2. Machine type
+   Choose the **smallest available machine**, for example:
+
+```
+u1-standard-h-1
+```
+
+This is sufficient because the database workload is very light.
+
+3. Storage
+   Attach the folder:
+
+```
+/SDU_data/youtubeDB
+```
+
+4. Initialization script
+   Enable **Initialization** and select:
+
+```
+/SDU_data/youtubeDB/db_init.sh
+```
+
+This script automatically starts PostgreSQL from the persistent storage directory.
+
+5. Start the job.
+
+After the job starts, the initialization script will run automatically.
+
+Wait **about 5 minutes** for the script to complete.
+
+At this point the **Postgres database is running and ready to accept connections.**
+
+## Connect from Remote Machine
+
+Because **Eduroam blocks direct connections to self-hosted databases**, we must connect through an **SSH tunnel**.
+
+This section is mainly relevant when working from **DATALAB or other restricted networks**.
+
+### 1. Get the SSH command from UCloud
+
+Open the running Ubuntu job and look at the 🔑**SSH tab**.
+
+You will see something like:
+
+```
+ssh ucloud@ssh.cloud.sdu.dk -p 1234
+```
+
+The **port number (`1234`) changes for every job**, so write it down.
+
+See:
+
+![image](img/ssh.png)
+
+### 2. Create the SSH tunnel from your local machine
+
+Run the following command locally:
+
+```bash
+ssh -v -N -i C:\Users\usr\.ssh\id_key \
+-L 15432:localhost:5432 \
+ucloud@ssh.cloud.sdu.dk -p 1234
+```
+
+Where:
+
+* `C:\Users\usr\.ssh\id_key` is the location of your SSH private key
+* `1234` is the port number shown in the UCloud SSH tab
+
+This command creates a **tunnel from your local port `15432` to the database port `5432` on the UCloud VM**.
+
+Once the tunnel is running, the database can be accessed locally via:
+
+```
+localhost:15432
+```
+
+
+### 3. Configure the project
+
+If it does not already exist, copy the `.env` file from:
+
+```
+O:\ARTS_SoMe-Influence\YT_Download_all_videos\.env
+```
+
+into the root of this repository.
+
+All project scripts read the database connection from this file (otherwise you have to specify this with `--db-url` when using any script connecting to the database).
+
+After the SSH tunnel is active and `.env` is present, **all scripts will work normally**.
+
+
+## Create the UCloud Database Setup From Scratch
+
+If the database environment must be rebuilt, follow these steps.
+
+### 1. Create persistent storage
+
+Create a folder in UCloud storage, for example:
+
+```
+/SDU_data/DB
+```
+
+Start a new **Ubuntu job** using this folder.
+
+Inside the job environment the folder will appear as:
+
+```
+/work/DB
+```
+
+### 2. Install PostgreSQL
+
+Update the package manager and install PostgreSQL:
+
+```bash
+sudo apt update -y
+sudo apt install postgresql postgresql-contrib -y
+```
+
+Note:
+The version installed here is **PostgreSQL 16**.
+This version number may change in future Ubuntu releases and is **IMPORTANT** for the paths.
+
+
+### 3. Move the database cluster to persistent storage
+
+Copy the default cluster to the persistent folder:
+
+```bash
+sudo rsync -av /var/lib/postgresql/16/main/ /work/DB/
+```
+
+Allow the postgres user to access the shared storage group:
+
+```bash
+sudo usermod -a -G ucloud postgres
+```
+
+### 4. Fix permissions (very important)
+
+PostgreSQL requires that it **owns all database files**.
+
+```bash
+sudo chown postgres:postgres /work/DB
+sudo chmod 700 /work/DB
+```
+
+Permissions must be **700 or 750** and owned by `postgres`.
+
+
+### 5. Copy configuration files
+
+Switch to the postgres user (`sudo -i -u postgres`) and copy the config files:
+
+```bash
+cp /etc/postgresql/16/main/postgresql.conf /work/DB/
+cp /etc/postgresql/16/main/pg_hba.conf /work/DB/
+cp /etc/postgresql/16/main/pg_ident.conf /work/DB/
+mkdir /work/DB/conf.d
+```
+
+### 6. Update paths in `postgresql.conf`
+
+Edit the config (still as posgres user):
+
+```bash
+nano /work/DB/postgresql.conf
+```
+
+Look for lines similar to:
+
+```
+data_directory = '/var/lib/postgresql/16/main'
+hba_file = '/etc/postgresql/16/main/pg_hba.conf'
+ident_file = '/etc/postgresql/16/main/pg_ident.conf'
+```
+
+Change them to:
+
+```
+data_directory = '/work/DB'
+hba_file = '/work/DB/pg_hba.conf'
+ident_file = '/work/DB/pg_ident.conf'
+```
+
+Save and exit:
+
+```
+CTRL + O
+ENTER
+CTRL + X
+```
+
+### 7. Update access rules
+
+Edit:
+
+```
+/work/DB/pg_hba.conf
+```
+
+Find lines like:
+
+```
+local   all   all                 peer
+host    all   all   127.0.0.1/32  scram-sha-256
+host    all   all   ::1/128       scram-sha-256
+```
+
+Change `scram-sha-256` to:
+
+```
+trust
+```
+
+This allows connections without a password.
+
+This is safe because the database is **only reachable through the SSH tunnel**, which requires an SSH key.
+
+### 8. Start PostgreSQL
+
+Start the server manually:
+
+```bash
+sudo -u postgres /usr/lib/postgresql/16/bin/postgres \
+-D /work/DB \
+-c config_file='/work/DB/postgresql.conf'
+```
+
+Once confirmed working, the same command should be executed automatically by the initialization script (`db_init.sh`) whenever a new UCloud job starts.
+
+
+
+### Troubleshooting
+
+If PostgreSQL does not start, the most common causes are:
+
+* Incorrect paths in `postgresql.conf`
+* Missing `conf.d` directory
+* Incorrect permissions
+* Files not owned by `postgres`
+
+Verify ownership:
+
+```bash
+ls -l /work/DB
+```
+
+All database files and directories must be owned by:
+
+```
+postgres:postgres
+```
+
+## Optional components
+
+### Archiver (optional)
+
+`start_archiver.py` watches downloaded local batch folders, zips them, and copies them to a shared archive directory. It was originally used to move local dowloads to shared drive after download completion.
+
+If you are useing a external harddrive, you can skip it.
 
 ```powershell
-python start_archiver.py --run-dir download_run_workerA --archive-dir "archive" --keep-batch-dir --keep-local-zip
+python start_archiver.py --run-dir "D:\yt_download_worker_a" --archive-dir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\archive"
 ```
 
-## Bot-check handling (YouTube verification)
+### Dashboard (WIP)
 
-The worker detects the specific YouTube bot-check error and treats it as **temporary**:
-- The video is released back to `pending` (attempts are not counted).
-- No error log file is written for that video.
-- A circuit breaker pauses the batch after consecutive bot-checks.
+`dashboard.py` is still work in progress. Use CLI scripts above as the primary and supported workflow.
 
-New worker flags:
-- `--block-threshold` (default 20): consecutive bot-checks before pausing
-- `--block-sleep-seconds` (default 900): initial sleep before probing again
-
-Dynamic backoff:
-- Each time the worker sleeps due to bot-check, the wait increases by **1.5?**.
-- When a probe **successfully downloads** a video, the next base wait becomes **0.8?** the last wait.
-- The wait state is persisted in `block_wait_state.json` inside the `--run-dir`.
-
-Probe behavior:
-- If the probe hits bot-check ? sleep again.
-- If the probe hits a non-bot error ? try another video immediately.
-- Resume full downloads **only** after a successful probe download.
-
-You can inspect the run logs to see bot-check events and sleep durations.
-
-## Re-run failed batch
-
-Retry only the failed videos from a specific batch ID. This creates a new
-retry batch and leaves the original batch record intact.
+## Reset database (destructive)
 
 ```powershell
-python rerun_failed_batch.py --batch-id BATCH_ID --worker-id workerA --run-dir download_run_workerA --workers 8
+python reset_database.py
 ```
 
-## Status reporting
-
-View current progress without affecting state:
-
-```powershell
-python get_status.py
-```
-
-## Dashboard 
-
-Run a local web dashboard to start/stop the host process, start workers, and
-see live status/run reports:
-
-```powershell
-python dashboard.py
-```
-
-Then open `http://localhost:8000` in a browser. The form fields default to the
-archive/backup paths shown earlier in this README.
-
-Notes:
-- The dashboard starts processes only on the machine where it is running.
-- It is a local tool with no auth; use it on a trusted network.
-
-
-## Utilities
-
-Lookup video info for one ID:
-
-```powershell
-python utilities/get_video_info.py --id VIDEO_ID
-```
-
-Lookup multiple IDs (comma-separated):
-
-```powershell
-python utilities/get_video_info.py --ids "id1,id2,id3" --format json
-```
-
-Lookup IDs from a file and write CSV:
-
-```powershell
-python utilities/get_video_info.py --ids-file ids.txt --format csv --out info.csv
-```
-
-Run history and logs:
-
-```powershell
-python utilities/get_run_report.py --tail 10
-python utilities/get_run_report.py --run-id RUN_ID --log-tail 50
-```
+Use only when you need to wipe downloader state and start over.
 
 ## Notes
 
-- Archive directory must exist or be creatable; scripts verify write access.
-- `--archive-dir` is required for all downloads; workers will refuse to start without it.
-- Local zips are deleted by default after a successful archive copy; use
-  `--keep-local-zip` to retain them.
-- Postgres is the source of truth for distributed progress and resume state.
-- Leases are set per video on claim and expire after `--lease-seconds`.
-  `host_database.py --reap` only resets expired leases; active downloads are not touched.
-- Workers extend leases periodically during active batches so long runs are safe.
-- Per-video failure logs are written under each batch folder in `logs/`.
-- Batch folders are deleted after zipping unless `--keep-batch-dir` is set.
+- Keep `DATABASE_URL` valid in `.env` on every machine that runs scripts.
+- Use `host_database.py --reap` (or another scheduled process) so expired leases are reclaimed.
+- Avoid sharing a single `--run-dir` across multiple machines.
+- Archive flow is optional; downloader does not require it.

@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import json
 import os
 import socket
@@ -58,8 +58,8 @@ def parse_args():
     )
     parser.add_argument(
         "--run-dir",
-        default="download_run",
-        help="Local run directory for batches/logs/zips.",
+        required=True,
+        help="Local run directory for this worker (for example D:\\yt_download_run).",
     )
     parser.add_argument(
         "--workers",
@@ -539,3 +539,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

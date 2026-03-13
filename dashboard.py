@@ -1,4 +1,4 @@
-import html
+﻿import html
 import os
 import subprocess
 import sys
@@ -19,7 +19,7 @@ DEFAULT_DB_URL = os.getenv(
 )
 DEFAULT_ARCHIVE_DIR = r"O:\ARTS_SoMe-Influence\YT_Download_all_videos\archive"
 DEFAULT_BACKUP_DIR = r"O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup"
-DEFAULT_RUN_DIR = "download_run"
+DEFAULT_RUN_DIR = ""
 
 
 STATE_LOCK = threading.Lock()
@@ -499,6 +499,8 @@ async def start_worker(request: Request):
         return JSONResponse({"error": "Missing db_url"}, status_code=400)
     if not archive_dir:
         return JSONResponse({"error": "Missing archive_dir"}, status_code=400)
+    if not run_dir:
+        return JSONResponse({"error": "Missing run_dir"}, status_code=400)
 
     cmd = [
         sys.executable,
@@ -708,3 +710,4 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="127.0.0.1", port=8000)
+

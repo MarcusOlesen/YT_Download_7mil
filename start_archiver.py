@@ -1,4 +1,4 @@
-import os
+﻿import os
 import argparse
 import shutil
 import tempfile
@@ -19,8 +19,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Start an archiver worker.")
     parser.add_argument(
         "--run-dir",
-        default="download_run",
-        help="Local run directory containing batch folders.",
+        required=True,
+        help="Local run directory containing batch folders and zips.",
     )
     parser.add_argument(
         "--archive-dir",
@@ -173,3 +173,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
