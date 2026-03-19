@@ -1,6 +1,6 @@
 import argparse
 import os
-
+from datetime import datetime
 import psycopg2
 from env_utils import load_env
 
@@ -161,7 +161,10 @@ def main():
     remaining = max(0, total - done)
     overall_pct = (done / total * 100.0) if total else 0.0
 
-    print("Distributed status")
+    now = datetime.now()
+    formatted_time = now.strftime("%H:%M %d-%m-%Y")
+
+    print(f"Distributed status at {formatted_time}")
     print(f"Total videos: {total}")
     print(
         "Done: {done} ({pct:.2f}%) | Remaining: {remaining} | "
