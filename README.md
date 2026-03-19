@@ -303,6 +303,11 @@ Once the tunnel is running, the database can be accessed locally via:
 localhost:15432
 ```
 
+If you for whatever reson need to query the database directly you can access `psql` like so:
+
+```
+psql -h localhost -p 15432 -U postgres -d youtubedb
+```
 
 ### 3. Configure the project
 

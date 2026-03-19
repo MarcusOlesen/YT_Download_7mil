@@ -5,3 +5,4 @@ example/
 __pycache__/
 .env
 README_OLD.md
+DB_backup/
