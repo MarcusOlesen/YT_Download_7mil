@@ -100,21 +100,128 @@ Check dependencies:
 ```powershell
 python -c "from scraper_utils import check_dependencies; check_dependencies()"
 ```
-## Initialize the database (run once)
 
-With `.env` in place, initialize tables and load IDs:
+## Start UCloud Database
 
-```powershell
-python create_database.py --batch-size 1000
+To run the central Postgres database we use a persistent storage folder on **UCloud** and start PostgreSQL automatically using an initialization script. This job should be running 24/7.
+
+### Prerequisites
+
+Before starting the database job you must:
+
+* Have an **SSH key registered in UCloud**
+* Have access to the shared folder:
+
+```
+/SDU_data/youtubeDB
 ```
 
-You can override input parquet paths if needed:
+This folder contains the database files and the initialization script.
 
-```powershell
-python create_database.py --ids-ok path\to\ids_ok_sorted.parquet `
-  --ids-no-upload path\to\ids_no_uploadinfo.parquet `
-  --ids-errors path\to\ids_with_errors.parquet
+
+
+### Start the database job
+
+1. Open **UCloud** and start a new **Ubuntu job**.
+
+2. Machine type
+   Choose the **smallest available machine**, for example:
+
 ```
+u1-standard-h-1
+```
+
+This is sufficient because the database workload is very light.
+
+3. Storage
+   Attach the folder:
+
+```
+/SDU_data/youtubeDB
+```
+
+4. Initialization script
+   Enable **Initialization** and select:
+
+```
+/SDU_data/youtubeDB/db_init.sh
+```
+
+This script automatically starts PostgreSQL from the persistent storage directory.
+
+5. Start the job.
+
+After the job starts, the initialization script will run automatically.
+
+Wait **about 1 minute** for the script to complete.
+
+At this point the **Postgres database is running and ready to accept connections.**
+
+## Connect from Remote Machine
+
+Because **Eduroam blocks direct connections to self-hosted databases**, we must connect through an **SSH tunnel**.
+
+This section is mainly relevant when working from **DATALAB or other restricted networks**.
+
+### 1. Get the SSH command from UCloud
+
+Open the running Ubuntu job and look at the 🔑**SSH tab**.
+
+You will see something like:
+
+```
+ssh ucloud@ssh.cloud.sdu.dk -p 1234
+```
+
+The **port number (`1234`) changes for every job**, so write it down.
+
+See:
+
+![image](img/ssh.png)
+
+### 2. Create the SSH tunnel from your local machine
+
+Run the following command locally:
+
+```bash
+ssh -v -N -i C:\Users\usr\.ssh\id_key \
+-L 15432:localhost:5432 \
+ucloud@ssh.cloud.sdu.dk -p 1234
+```
+
+Where:
+
+* `C:\Users\usr\.ssh\id_key` is the location of your SSH private key
+* `1234` is the port number shown in the UCloud SSH tab
+
+This command creates a **tunnel from your local port `15432` to the database port `5432` on the UCloud VM**.
+
+Once the tunnel is running, the database can be accessed locally via:
+
+```
+localhost:15432
+```
+
+If you for whatever reson need to query the database directly you can access `psql` like so:
+
+```
+psql -h localhost -p 15432 -U postgres -d youtubedb
+```
+
+### 3. Configure the project
+
+If it does not already exist, copy the `.env` file from:
+
+```
+O:\ARTS_SoMe-Influence\YT_Download_all_videos\.env
+```
+
+into the root of this repository.
+
+All project scripts read the database connection from this file (otherwise you have to specify this with `--db-url` when using any script connecting to the database).
+
+After the SSH tunnel is active and `.env` is present, **all scripts will work normally**.
+
 
 ## Run downloads
 
@@ -201,128 +308,6 @@ python -m utilities.get_video_info --ids-file ids.txt --format csv --out info.cs
 python -m utilities.get_run_report --tail 10
 python -m utilities.get_run_report --run-id RUN_ID --log-tail 100
 ```
-
-## Start UCloud Database
-
-To run the central Postgres database we use a persistent storage folder on **UCloud** and start PostgreSQL automatically using an initialization script. This job should be running 24/7.
-
-### Prerequisites
-
-Before starting the database job you must:
-
-* Have an **SSH key registered in UCloud**
-* Have access to the shared folder:
-
-```
-/SDU_data/youtubeDB
-```
-
-This folder contains the database files and the initialization script.
-
-
-
-### Start the database job
-
-1. Open **UCloud** and start a new **Ubuntu job**.
-
-2. Machine type
-   Choose the **smallest available machine**, for example:
-
-```
-u1-standard-h-1
-```
-
-This is sufficient because the database workload is very light.
-
-3. Storage
-   Attach the folder:
-
-```
-/SDU_data/youtubeDB
-```
-
-4. Initialization script
-   Enable **Initialization** and select:
-
-```
-/SDU_data/youtubeDB/db_init.sh
-```
-
-This script automatically starts PostgreSQL from the persistent storage directory.
-
-5. Start the job.
-
-After the job starts, the initialization script will run automatically.
-
-Wait **about 5 minutes** for the script to complete.
-
-At this point the **Postgres database is running and ready to accept connections.**
-
-## Connect from Remote Machine
-
-Because **Eduroam blocks direct connections to self-hosted databases**, we must connect through an **SSH tunnel**.
-
-This section is mainly relevant when working from **DATALAB or other restricted networks**.
-
-### 1. Get the SSH command from UCloud
-
-Open the running Ubuntu job and look at the 🔑**SSH tab**.
-
-You will see something like:
-
-```
-ssh ucloud@ssh.cloud.sdu.dk -p 1234
-```
-
-The **port number (`1234`) changes for every job**, so write it down.
-
-See:
-
-![image](img/ssh.png)
-
-### 2. Create the SSH tunnel from your local machine
-
-Run the following command locally:
-
-```bash
-ssh -v -N -i C:\Users\usr\.ssh\id_key \
--L 15432:localhost:5432 \
-ucloud@ssh.cloud.sdu.dk -p 1234
-```
-
-Where:
-
-* `C:\Users\usr\.ssh\id_key` is the location of your SSH private key
-* `1234` is the port number shown in the UCloud SSH tab
-
-This command creates a **tunnel from your local port `15432` to the database port `5432` on the UCloud VM**.
-
-Once the tunnel is running, the database can be accessed locally via:
-
-```
-localhost:15432
-```
-
-If you for whatever reson need to query the database directly you can access `psql` like so:
-
-```
-psql -h localhost -p 15432 -U postgres -d youtubedb
-```
-
-### 3. Configure the project
-
-If it does not already exist, copy the `.env` file from:
-
-```
-O:\ARTS_SoMe-Influence\YT_Download_all_videos\.env
-```
-
-into the root of this repository.
-
-All project scripts read the database connection from this file (otherwise you have to specify this with `--db-url` when using any script connecting to the database).
-
-After the SSH tunnel is active and `.env` is present, **all scripts will work normally**.
-
 
 ## Create the UCloud Database Setup From Scratch
 
@@ -465,7 +450,21 @@ sudo -u postgres /usr/lib/postgresql/16/bin/postgres \
 
 Once confirmed working, the same command should be executed automatically by the initialization script (`db_init.sh`) whenever a new UCloud job starts.
 
+## Initialize the database (run only once after database is newly created)
 
+With `.env` in place, initialize tables and load IDs:
+
+```powershell
+python create_database.py --batch-size 1000
+```
+
+You can override input parquet paths if needed:
+
+```powershell
+python create_database.py --ids-ok path\to\ids_ok_sorted.parquet `
+  --ids-no-upload path\to\ids_no_uploadinfo.parquet `
+  --ids-errors path\to\ids_with_errors.parquet
+```
 
 ### Troubleshooting
 
