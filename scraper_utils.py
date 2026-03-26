@@ -127,7 +127,7 @@ def download_video(video_id, download_dir, test=False):
         'age_limit': 18,
         'retries': 3,
         'logger': logger,
-        'http_headers': {'User-Agent': 'AU_Datalab/3.0'},
+        'http_headers': {'User-Agent': 'AU_Datalab/4.0'},
     }
 
     try:

@@ -227,7 +227,7 @@ def probe_until_clear(db_url, worker_id, lease_seconds, max_attempts, run_id, ar
             "info",
             f"Bot-check sleep for {current_wait}s before probing.",
         )
-        print(f"[BOT-BLOCK] Sleeping {current_wait}s. Next probe at {utc_now()}")
+        print(f"[BOT-BLOCK] Sleeping {current_wait}s. Current time (UTC): {utc_now()}")
         time.sleep(current_wait)
         state["last_wait_ended_at"] = utc_now()
         state["last_wait_seconds"] = int(current_wait)

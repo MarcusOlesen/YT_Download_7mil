@@ -6,3 +6,4 @@ __pycache__/
 .env
 README_OLD.md
 DB_backup/
+img/Thumbs.db
