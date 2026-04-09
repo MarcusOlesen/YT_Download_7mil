@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import glob
 import os
 import shutil
@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from distributed_core import connect_db, reap_expired_leases
 from env_utils import load_env
+from terminal_logging import start_terminal_logging
 
 load_env()
 
@@ -51,6 +52,11 @@ def parse_args():
         "--once",
         action="store_true",
         help="Run a single backup and exit.",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default="",
+        help="Directory for captured terminal logs. Defaults to <backup-dir>\\logs.",
     )
     return parser.parse_args()
 
@@ -100,6 +106,10 @@ def rotate_backups(backup_dir, keep):
 
 def main():
     args = parse_args()
+    start_terminal_logging(
+        "backup_and_reap",
+        args.log_dir or os.path.join(args.backup_dir, "logs"),
+    )
     db_url = args.db_url or os.getenv("DATABASE_URL", "")
     if not db_url:
         raise SystemExit("Missing --db-url or DATABASE_URL.")
@@ -131,3 +141,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

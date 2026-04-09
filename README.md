@@ -1,4 +1,4 @@
-# YouTube Distributed Downloader
+﻿# YouTube Distributed Downloader
 
 Distributed YouTube downloader coordinated by a shared Postgres database.
 
@@ -165,7 +165,7 @@ This section is mainly relevant when working from **DATALAB or other restricted 
 
 ### 1. Get the SSH command from UCloud
 
-Open the running Ubuntu job and look at the 🔑**SSH tab**.
+Open the running Ubuntu job and look at the ðŸ”‘**SSH tab**.
 
 You will see something like:
 
@@ -184,14 +184,18 @@ See:
 Run the following command locally (need to install auto ssh):
 
 ```bash
-autossh -M 0 ^
-  -o LogLevel=DEBUG3 ^
-  -o ServerAliveInterval=60 ^
-  -o ServerAliveCountMax=3 ^
-  -E tunnel.log ^
-  -i C:\Users\usr\.ssh\id_key ^
-  -L 15432:localhost:5432 ^
-  ucloud@ssh.cloud.sdu.dk -p 1234
+while ($true) {
+    ssh -N `
+      -o ServerAliveInterval=60 `
+      -o ServerAliveCountMax=3 `
+      -o TCPKeepAlive=yes `
+      -o ExitOnForwardFailure=yes `
+      -i C:\Users\usr\.ssh\id_key `
+      -L 15432:localhost:5432 `
+      ucloud@ssh.cloud.sdu.dk -p 1234
+
+    Start-Sleep -Seconds 5
+}
 ```
 
 Where:
@@ -205,11 +209,6 @@ Once the tunnel is running, the database can be accessed locally via:
 
 ```
 localhost:15432
-```
-
-Generally it may be a good idea to also log the terminal output by adding the following at the end of the command. With [Name] being replaced with something descriptive like "tunnel".
-```
-  2>&1 | Tee-Object -FilePath .\logs\[NAME].log -Append
 ```
 
 
@@ -244,6 +243,8 @@ Single worker example:
 python start_download.py --run-dir "D:\yt_download_worker_a" --workers 8
 ```
 
+This also writes the script's terminal output to a timestamped file under `D:\yt_download_worker_a\logs` by default. Override that location with `--log-dir`.
+
 Legacy sequential behavior:
 
 ```powershell
@@ -260,6 +261,7 @@ What goes into `--run-dir`:
 
 - `worker_id.txt`
 - `block_wait_state.json`
+- `logs/start_download_<worker_id>_<timestamp>.log`
 - `batches/<batch_id>/videos`
 - `batches/<batch_id>/logs`
 - `probe/` and `probe_logs/` when bot-check probing is active
@@ -278,6 +280,8 @@ Reap expired leases + save backups (up to 3) every `--interval-minutes`:
 ```powershell
 python backup_and_reap.py --backup-dir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup" --interval-minutes 60 --reap
 ```
+
+This also writes the script's terminal output to a timestamped file under `O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup\logs` by default. Override that location with `--log-dir`.
 
 One-time backup:
 
@@ -299,11 +303,7 @@ Quick status snapshot:
 python get_status.py
 ```
 
-As mentioned earlier it may be a good idea to also log the terminal output of any script by adding the following at the end of the command. 
-```
-  2>&1 | Tee-Object -FilePath .\logs\[NAME].log -Append
-```
-With [Name] being replaced with something descriptive.
+`start_download.py` and `backup_and_reap.py` now capture their terminal output internally, so external `Tee-Object` is only needed for other scripts.
 
 Eventually this could be made as a nice overview in the dashboard script but for now this is a WIP
 
@@ -535,4 +535,5 @@ Use only when you need to wipe downloader state and start over.
 - Use `backup_and_reap.py --reap` (or another scheduled process) so expired leases are reclaimed.
 - Avoid sharing a single `--run-dir` across multiple machines.
 - Archive flow is optional; downloader does not require it.
+
 

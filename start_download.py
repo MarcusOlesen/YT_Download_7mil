@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timezone
 
 from scraper_utils import check_dependencies
+from terminal_logging import start_terminal_logging
 
 from distributed_core import (
     build_existing_map,
@@ -99,6 +100,11 @@ def parse_args():
         "--test-mode",
         action="store_true",
         help="Skip downloads (yt-dlp test mode).",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default="",
+        help="Directory for captured terminal logs. Defaults to <run-dir>\\logs.",
     )
     parser.add_argument(
         "--block-threshold",
@@ -318,8 +324,13 @@ def main():
     if args.overlap_batches < 1:
         raise SystemExit("--overlap-batches must be >= 1.")
 
-    db_url = args.db_url or os.getenv("DATABASE_URL", "")
     args.worker_id = resolve_worker_id(args.run_dir, args.worker_id)
+    start_terminal_logging(
+        "start_download",
+        args.log_dir or os.path.join(args.run_dir, "logs"),
+        args.worker_id,
+    )
+    db_url = args.db_url or os.getenv("DATABASE_URL", "")
     print(f"Worker ID: {args.worker_id}")
     if not db_url:
         raise SystemExit("Missing --db-url or DATABASE_URL.")
@@ -702,6 +713,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
