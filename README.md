@@ -181,12 +181,17 @@ See:
 
 ### 2. Create the SSH tunnel from your local machine
 
-Run the following command locally:
+Run the following command locally (need to install auto ssh):
 
 ```bash
-ssh -v -N -i C:\Users\usr\.ssh\id_key \
--L 15432:localhost:5432 \
-ucloud@ssh.cloud.sdu.dk -p 1234
+autossh -M 0 ^
+  -o LogLevel=DEBUG3 ^
+  -o ServerAliveInterval=60 ^
+  -o ServerAliveCountMax=3 ^
+  -E tunnel.log ^
+  -i C:\Users\usr\.ssh\id_key ^
+  -L 15432:localhost:5432 ^
+  ucloud@ssh.cloud.sdu.dk -p 1234
 ```
 
 Where:
@@ -202,7 +207,13 @@ Once the tunnel is running, the database can be accessed locally via:
 localhost:15432
 ```
 
-If you for whatever reson need to query the database directly you can access `psql` like so:
+Generally it may be a good idea to also log the terminal output by adding the following at the end of the command. With [Name] being replaced with something descriptive like "tunnel".
+```
+  2>&1 | Tee-Object -FilePath .\logs\[NAME].log -Append
+```
+
+
+If you for whatever reason need to query the database directly you can access `psql` like so:
 
 ```
 psql -h localhost -p 15432 -U postgres -d youtubedb
@@ -287,6 +298,12 @@ Quick status snapshot:
 ```powershell
 python get_status.py
 ```
+
+As mentioned earlier it may be a good idea to also log the terminal output of any script by adding the following at the end of the command. 
+```
+  2>&1 | Tee-Object -FilePath .\logs\[NAME].log -Append
+```
+With [Name] being replaced with something descriptive.
 
 Eventually this could be made as a nice overview in the dashboard script but for now this is a WIP
 
@@ -447,6 +464,7 @@ sudo -u postgres /usr/lib/postgresql/16/bin/postgres \
 -D /work/DB \
 -c config_file='/work/DB/postgresql.conf'
 ```
+Then you need to create a database with psql
 
 Once confirmed working, the same command should be executed automatically by the initialization script (`db_init.sh`) whenever a new UCloud job starts.
 
