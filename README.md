@@ -185,7 +185,7 @@ Run the following command locally (need to install auto ssh):
 
 ```bash
 while ($true) {
-    ssh -N `
+    ssh -v -N `
       -o ServerAliveInterval=60 `
       -o ServerAliveCountMax=3 `
       -o TCPKeepAlive=yes `
