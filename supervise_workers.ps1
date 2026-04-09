@@ -58,6 +58,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:SupervisorLogWriter = $null
 
 function Write-Log {
     param(
@@ -68,7 +69,13 @@ function Write-Log {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $line = "[{0}] [{1}] {2}" -f $timestamp, $Level.ToUpperInvariant(), $Message
     Write-Host $line
-    Add-Content -LiteralPath $script:SupervisorLogPath -Value $line
+    if ($null -ne $script:SupervisorLogWriter) {
+        $script:SupervisorLogWriter.WriteLine($line)
+        $script:SupervisorLogWriter.Flush()
+    }
+    else {
+        Add-Content -LiteralPath $script:SupervisorLogPath -Value $line
+    }
 }
 
 function Resolve-Executable {
@@ -162,7 +169,7 @@ function New-ServiceDefinition {
 function Start-ServiceInstance {
     param($Service)
 
-    $timestamp = Get-Date -Format "yyyyMMddTHHmmss"
+    $timestamp = Get-Date -Format "yyyyMMddTHHmmssfff"
     $stdoutPath = Join-Path $SupervisorLogDir ("{0}_{1}_stdout.log" -f $Service.Name, $timestamp)
     $stderrPath = Join-Path $SupervisorLogDir ("{0}_{1}_stderr.log" -f $Service.Name, $timestamp)
 
@@ -235,7 +242,13 @@ if ([string]::IsNullOrWhiteSpace($SupervisorLogDir)) {
 $SupervisorLogDir = [System.IO.Path]::GetFullPath($SupervisorLogDir)
 New-Item -ItemType Directory -Path $SupervisorLogDir -Force | Out-Null
 
-$script:SupervisorLogPath = Join-Path $SupervisorLogDir ("supervisor_{0}.log" -f (Get-Date -Format "yyyyMMddTHHmmss"))
+$script:SupervisorLogPath = Join-Path $SupervisorLogDir ("supervisor_{0}.log" -f (Get-Date -Format "yyyyMMddTHHmmssfff"))
+$script:SupervisorLogWriter = [System.IO.StreamWriter]::new(
+    $script:SupervisorLogPath,
+    $true,
+    [System.Text.UTF8Encoding]::new($false)
+)
+$script:SupervisorLogWriter.AutoFlush = $true
 
 Write-Log ("Repo root: {0}" -f $RepoRoot)
 Write-Log ("Supervisor log: {0}" -f $script:SupervisorLogPath)
@@ -417,4 +430,10 @@ finally {
     foreach ($service in $services) {
         Stop-ServiceInstance -Service $service
     }
+}
+
+if ($null -ne $script:SupervisorLogWriter) {
+    $script:SupervisorLogWriter.Flush()
+    $script:SupervisorLogWriter.Dispose()
+    $script:SupervisorLogWriter = $null
 }

@@ -311,6 +311,33 @@ Eventually this could be made as a nice overview in the dashboard script but for
 
 `supervise_workers.ps1` can keep the SSH tunnel and selected long-running workers alive. The SSH port, SSH key path, and forwarded local DB port are all parameters, so you do not have to hardcode them.
 
+For easier day-to-day use, you can launch it through `start_supervisor.bat`. The first run creates `supervise_workers.config.psd1` from `supervise_workers.config.example.psd1`. After that, edit the config file instead of rewriting a long command line.
+
+Typical flow:
+
+```powershell
+.\start_supervisor.bat
+```
+
+If the config file already exists and you just want to edit it:
+
+```powershell
+.\start_supervisor.bat -EditConfig
+```
+
+Useful settings to change in `supervise_workers.config.psd1`:
+
+- `KeyPath`
+- `SshPort`
+- `LocalDbPort`
+- `RunDir`
+- `DownloadArgs`
+- `StartBackupAndReap`
+- `BackupDir`
+- `BackupArgs`
+- `StartArchiver`
+- `ArchiveDir`
+
 Downloader only:
 
 ```powershell
@@ -338,10 +365,11 @@ Downloader plus backup/reap:
 
 Notes:
 
-- `backup_and_reap.py` is optional. It starts only when you pass `-StartBackupAndReap`.
+- `backup_and_reap.py` is optional. It starts only when `StartBackupAndReap = $true` in the config, or when you pass `-StartBackupAndReap` directly to `supervise_workers.ps1`.
 - If you change the forwarded local DB port, the supervisor rewrites `DATABASE_URL` for child processes to use `localhost:<LocalDbPort>` unless you pass `-DatabaseUrl` explicitly.
 - Use `-StartArchiver` and `-ArchiveDir` if you also want to supervise the archiver.
 - Use `-ValidateOnly` to check the configuration without starting any processes.
+- `start_supervisor.bat -ValidateOnly` runs the launcher plus config loading without starting the supervised processes.
 
 ## Utility scripts
 
@@ -571,4 +599,3 @@ Use only when you need to wipe downloader state and start over.
 - Use `backup_and_reap.py --reap` (or another scheduled process) so expired leases are reclaimed.
 - Avoid sharing a single `--run-dir` across multiple machines.
 - Archive flow is optional; downloader does not require it.
-

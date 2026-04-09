@@ -7,3 +7,5 @@ __pycache__/
 README_OLD.md
 DB_backup/
 img/Thumbs.db
+logs/
+supervise_workers.config.psd1
