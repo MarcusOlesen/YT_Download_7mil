@@ -307,6 +307,42 @@ python get_status.py
 
 Eventually this could be made as a nice overview in the dashboard script but for now this is a WIP
 
+## PowerShell supervisor
+
+`supervise_workers.ps1` can keep the SSH tunnel and selected long-running workers alive. The SSH port, SSH key path, and forwarded local DB port are all parameters, so you do not have to hardcode them.
+
+Downloader only:
+
+```powershell
+.\supervise_workers.ps1 `
+  -KeyPath "C:\Users\usr\.ssh\id_key" `
+  -SshPort 1234 `
+  -StartDownloader `
+  -RunDir "D:\yt_download_worker_a" `
+  -DownloadArgs @("--workers", "8")
+```
+
+Downloader plus backup/reap:
+
+```powershell
+.\supervise_workers.ps1 `
+  -KeyPath "C:\Users\usr\.ssh\id_key" `
+  -SshPort 1234 `
+  -StartDownloader `
+  -RunDir "D:\yt_download_worker_a" `
+  -DownloadArgs @("--workers", "8") `
+  -StartBackupAndReap `
+  -BackupDir "O:\ARTS_SoMe-Influence\YT_Download_all_videos\DB_backup" `
+  -BackupArgs @("--interval-minutes", "60", "--reap")
+```
+
+Notes:
+
+- `backup_and_reap.py` is optional. It starts only when you pass `-StartBackupAndReap`.
+- If you change the forwarded local DB port, the supervisor rewrites `DATABASE_URL` for child processes to use `localhost:<LocalDbPort>` unless you pass `-DatabaseUrl` explicitly.
+- Use `-StartArchiver` and `-ArchiveDir` if you also want to supervise the archiver.
+- Use `-ValidateOnly` to check the configuration without starting any processes.
+
 ## Utility scripts
 
 Run these from the repository root using module form:
@@ -535,5 +571,4 @@ Use only when you need to wipe downloader state and start over.
 - Use `backup_and_reap.py --reap` (or another scheduled process) so expired leases are reclaimed.
 - Avoid sharing a single `--run-dir` across multiple machines.
 - Archive flow is optional; downloader does not require it.
-
 

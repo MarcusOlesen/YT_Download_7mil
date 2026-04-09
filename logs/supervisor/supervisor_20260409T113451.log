@@ -1,0 +1,6 @@
+[2026-04-09 11:34:51] [INFO] Repo root: O:\ARTS_SoMe-Influence\YT_Download_all_videos
+[2026-04-09 11:34:51] [INFO] Supervisor log: O:\ARTS_SoMe-Influence\YT_Download_all_videos\logs\supervisor\supervisor_20260409T113451.log
+[2026-04-09 11:34:51] [INFO] Python executable: C:\Users\au700932\AppData\Local\Programs\Python\Python314\python.exe
+[2026-04-09 11:34:51] [INFO] Service plan:
+[2026-04-09 11:34:51] [INFO]   start_download: Downloader worker using run dir D:\yt_download_worker_a
+[2026-04-09 11:34:51] [INFO] Validation completed. No processes were started.
