@@ -33,6 +33,8 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require
 - `reset_database.py`: destructive reset of downloader tables.
 - `start_archiver.py`: optional zip/archive worker (not required for downloading).
 - `dashboard.py`: local dashboard (work in progress).
+- `setup_worker.py`: one-time worker auth/profile setup.
+- `refresh_cookies.py`: refresh cookies for an existing worker profile.
 - `utilities/get_video_info.py`: inspect DB state for specific IDs.
 - `utilities/get_run_report.py`: inspect run history and logs.
 ## Setup
@@ -99,6 +101,20 @@ Check dependencies:
 
 ```powershell
 python -c "from scraper_utils import check_dependencies; check_dependencies()"
+```
+
+6) Run one-time worker setup for each machine/run-dir.
+
+This creates `worker_profile.json` and machine-specific YouTube cookies used by the anti-block pipeline.
+
+```powershell
+python setup_worker.py --run-dir "D:\yt_download_worker_a" --preset normal
+```
+
+If cookies expire later, refresh them without changing your run-dir:
+
+```powershell
+python refresh_cookies.py --run-dir "D:\yt_download_worker_a"
 ```
 
 ## Start UCloud Database
@@ -237,6 +253,9 @@ After the SSH tunnel is active and `.env` is present, **all scripts will work no
 
 `--run-dir` is required. Set it explicitly for each worker machine, for example on `D:\`.
 
+Important: `start_download.py` now expects a prepared worker profile in the run dir.
+Run `setup_worker.py` once per machine/run-dir before starting workers.
+
 Single worker example:
 
 ```powershell
@@ -316,6 +335,7 @@ For easier day-to-day use, you can launch it through `start_supervisor.bat`. The
 Typical flow:
 
 ```powershell
+python setup_worker.py --run-dir "D:\yt_download_worker_a" --preset normal
 .\start_supervisor.bat
 ```
 
@@ -568,6 +588,16 @@ All database files and directories must be owned by:
 ```
 postgres:postgres
 ```
+
+Downloader troubleshooting matrix:
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| Worker exits with missing worker profile | `setup_worker.py` was not run for this `--run-dir` | Run `python setup_worker.py --run-dir ...` once, then restart worker |
+| Worker exits with anti-block dependency errors | Missing `deno`, `yt_dlp_ejs`, or `bgutil-ytdlp-pot-provider` | Install requirements and rerun setup |
+| Worker exits with invalid/missing cookies | Cookie file missing, expired, or corrupted | Run `python refresh_cookies.py --run-dir ...` |
+| Logs show `Global cooldown active` | Another worker (or this one) hit rate-limit and wrote shared cooldown to DB meta | Wait for cooldown to expire; workers resume automatically |
+| Logs show shared cooldown read/write warning | Temporary DB issue while handling cooldown key | Worker continues with local pacing (soft mode); inspect DB/tunnel stability |
 
 ## Optional components
 

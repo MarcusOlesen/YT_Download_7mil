@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pyarrow.parquet as pq
 import psycopg2
@@ -20,9 +20,25 @@ DEFAULT_DATASETS = [
     {"name": "ids_with_errors", "path": os.path.join("data", "ids_with_errors.parquet")},
 ]
 
+GLOBAL_COOLDOWN_META_KEY = "global_cooldown_until_utc"
+
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_utc_timestamp(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def strip_ansi(text):
@@ -239,6 +255,48 @@ def ensure_meta(conn, key, value):
         return
     if str(existing) != str(value):
         raise RuntimeError(f"Meta mismatch for {key}.")
+
+
+def get_global_cooldown_until(conn, key=GLOBAL_COOLDOWN_META_KEY):
+    raw = get_meta(conn, key)
+    if raw is None:
+        return None
+    try:
+        return parse_utc_timestamp(raw)
+    except Exception:
+        return None
+
+
+def extend_global_cooldown(conn, cooldown_seconds, key=GLOBAL_COOLDOWN_META_KEY):
+    cooldown_seconds = int(cooldown_seconds or 0)
+    if cooldown_seconds <= 0:
+        return get_global_cooldown_until(conn, key=key)
+
+    now = datetime.now(timezone.utc)
+    requested_until = now + timedelta(seconds=cooldown_seconds)
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM meta WHERE key = %s FOR UPDATE", (key,))
+            row = cur.fetchone()
+            existing_until = None
+            if row and row[0]:
+                try:
+                    existing_until = parse_utc_timestamp(row[0])
+                except Exception:
+                    existing_until = None
+
+            final_until = requested_until
+            if existing_until and existing_until > requested_until:
+                final_until = existing_until
+
+            cur.execute(
+                "INSERT INTO meta (key, value) VALUES (%s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (key, final_until.isoformat()),
+            )
+
+    return final_until
 
 def create_run(
     conn,

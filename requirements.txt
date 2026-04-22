@@ -4,3 +4,6 @@ psycopg2-binary>=2.9
 fastapi>=0.110
 uvicorn>=0.27
 python-dotenv>=1.0
+undetected-chromedriver>=3.5
+yt-dlp-ejs>=0.4
+bgutil-ytdlp-pot-provider>=1.1

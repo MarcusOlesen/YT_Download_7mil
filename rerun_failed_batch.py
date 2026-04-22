@@ -9,7 +9,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timezone
 
-from scraper_utils import check_dependencies
+from scraper_utils import initialize_worker_pipeline
 
 from distributed_core import (
     build_existing_map,
@@ -21,9 +21,11 @@ from distributed_core import (
     download_one,
     extend_batch_leases,
     ensure_db_ready,
+    extend_global_cooldown,
     finish_run,
     get_batch_counts,
     get_meta,
+    get_global_cooldown_until,
     log_run_event,
     record_run_error,
     release_blocked_video,
@@ -36,6 +38,28 @@ from distributed_core import (
 from env_utils import load_env
 
 load_env()
+
+
+def configure_worker_pipeline(run_dir, db_url):
+    def _read_shared_cooldown():
+        conn = connect_db(db_url)
+        try:
+            return get_global_cooldown_until(conn)
+        finally:
+            conn.close()
+
+    def _write_shared_cooldown(cooldown_seconds):
+        conn = connect_db(db_url)
+        try:
+            return extend_global_cooldown(conn, cooldown_seconds)
+        finally:
+            conn.close()
+
+    return initialize_worker_pipeline(
+        run_dir,
+        shared_cooldown_reader=_read_shared_cooldown,
+        shared_cooldown_writer=_write_shared_cooldown,
+    )
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -343,7 +367,15 @@ def main():
     )
     conn.close()
 
-    check_dependencies(allow_continue=True)
+    try:
+        profile = configure_worker_pipeline(args.run_dir, db_url)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc))
+    print(
+        "Anti-block profile loaded: "
+        f"preset={profile.get('preset')} "
+        f"target_titles_per_hour={profile.get('target_titles_per_hour')}"
+    )
 
     batch_id = next_batch_id(args.run_dir, args.worker_id, prefix="retry")
 
