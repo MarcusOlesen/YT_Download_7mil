@@ -111,6 +111,11 @@ This creates `worker_profile.json` and machine-specific YouTube cookies used by 
 python setup_worker.py --run-dir "D:\yt_download_worker_a" --preset normal
 ```
 
+Standalone browser note:
+- `setup_worker.py` / `refresh_cookies.py` can use a bundled browser in this repo at `chrome-win\chrome.exe`.
+- If present, that bundled browser is preferred automatically for cookie login.
+- You can still override with `--browser-binary` (or `CHROME_BINARY` env var).
+
 If cookies expire later, refresh them without changing your run-dir:
 
 ```powershell

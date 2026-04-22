@@ -52,6 +52,14 @@ def parse_args():
         help="Preferred max video height (default 360).",
     )
     parser.add_argument(
+        "--browser-binary",
+        default="",
+        help=(
+            "Optional browser binary for cookie login. If omitted, setup will "
+            "prefer <repo>\\chrome-win\\chrome.exe when available."
+        ),
+    )
+    parser.add_argument(
         "--reuse-existing-cookies",
         action="store_true",
         help="Skip browser login if cookie file already exists and is valid.",
@@ -79,7 +87,7 @@ def main():
         print(f"Using existing cookie file: {cookie_file}")
     else:
         print("Starting browser login flow to capture YouTube cookies...")
-        capture_youtube_cookies(cookie_file)
+        capture_youtube_cookies(cookie_file, browser_binary=args.browser_binary)
 
     if not is_valid_netscape_cookie_file(cookie_file):
         raise SystemExit(

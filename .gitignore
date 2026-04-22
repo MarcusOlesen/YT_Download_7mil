@@ -9,3 +9,4 @@ DB_backup/
 img/Thumbs.db
 logs/
 supervise_workers.config.psd1
+chrome-win/

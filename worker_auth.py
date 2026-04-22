@@ -1,6 +1,8 @@
 import os
+import shutil
 import tempfile
 import time
+from pathlib import Path
 
 
 COOKIE_HEADER = "# Netscape HTTP Cookie File\n"
@@ -38,7 +40,62 @@ def serialize_cookies_to_netscape(cookies):
     return "\n".join(lines) + "\n"
 
 
-def capture_youtube_cookies(cookie_file):
+def _find_chrome_binary(browser_binary=""):
+    if browser_binary:
+        explicit = os.path.abspath(os.path.expanduser(browser_binary))
+        if os.path.exists(explicit):
+            return explicit
+        raise RuntimeError(
+            f"Configured browser binary does not exist: {explicit}"
+        )
+
+    repo_root = Path(__file__).resolve().parent
+    repo_local_candidates = [
+        repo_root / "chrome-win" / "chrome.exe",
+        repo_root / "browser" / "chrome.exe",
+        repo_root / "browser" / "msedge.exe",
+    ]
+    for candidate in repo_local_candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    env_candidates = [
+        os.getenv("CHROME_BINARY"),
+        os.getenv("GOOGLE_CHROME_BIN"),
+        os.getenv("CHROME_BIN"),
+    ]
+    for candidate in env_candidates:
+        if candidate and os.path.exists(candidate):
+            return os.path.abspath(candidate)
+
+    for candidate in ("chrome", "chrome.exe", "msedge", "msedge.exe"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return os.path.abspath(resolved)
+
+    local_app_data = os.getenv("LOCALAPPDATA", "")
+    program_files = os.getenv("PROGRAMFILES", r"C:\Program Files")
+    program_files_x86 = os.getenv("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+
+    path_candidates = [
+        Path(local_app_data) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(program_files) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(program_files_x86) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(program_files) / "Chromium" / "Application" / "chrome.exe",
+        Path(program_files_x86) / "Chromium" / "Application" / "chrome.exe",
+        Path(local_app_data) / "Chromium" / "Application" / "chrome.exe",
+        Path(local_app_data) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(program_files) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+        Path(program_files_x86) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+    ]
+    for candidate in path_candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    return None
+
+
+def capture_youtube_cookies(cookie_file, browser_binary=""):
     try:
         import undetected_chromedriver as uc
     except Exception as exc:
@@ -50,9 +107,18 @@ def capture_youtube_cookies(cookie_file):
     options = uc.ChromeOptions()
     options.add_argument("--disable-blink-features=AutomationControlled")
 
+    chrome_binary = _find_chrome_binary(browser_binary)
+    if not chrome_binary:
+        raise RuntimeError(
+            "Could not locate a Chrome/Chromium/Edge executable. "
+            "You can bundle one at <repo>\\chrome-win\\chrome.exe or set "
+            "CHROME_BINARY / --browser-binary to a full browser path."
+        )
+    options.binary_location = chrome_binary
+
     driver = None
     try:
-        driver = uc.Chrome(options=options)
+        driver = uc.Chrome(options=options, browser_executable_path=chrome_binary)
         driver.get("https://www.youtube.com")
 
         print("\n" + "=" * 72)

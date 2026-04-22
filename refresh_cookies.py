@@ -25,6 +25,14 @@ def parse_args():
         default="",
         help="Optional cookie file path override.",
     )
+    parser.add_argument(
+        "--browser-binary",
+        default="",
+        help=(
+            "Optional browser binary for cookie login. If omitted, refresh will "
+            "prefer <repo>\\chrome-win\\chrome.exe when available."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -43,7 +51,7 @@ def main():
     cookie_file = os.path.abspath(os.path.expanduser(cookie_file))
 
     print("Starting browser login flow to refresh cookies...")
-    capture_youtube_cookies(cookie_file)
+    capture_youtube_cookies(cookie_file, browser_binary=args.browser_binary)
 
     if not is_valid_netscape_cookie_file(cookie_file):
         raise SystemExit(
