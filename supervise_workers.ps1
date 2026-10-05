@@ -121,13 +121,13 @@ function Get-DotEnvValue {
 function Update-DatabaseUrlPort {
     param(
         [string]$Url,
-        [string]$Host,
+        [string]$HostName,
         [int]$Port
     )
 
     $uri = [Uri]$Url
     $userInfo = if ([string]::IsNullOrWhiteSpace($uri.UserInfo)) { "" } else { "{0}@" -f $uri.UserInfo }
-    $authority = "{0}:{1}" -f $Host, $Port
+    $authority = "{0}:{1}" -f $HostName, $Port
     return "{0}://{1}{2}{3}{4}" -f $uri.Scheme, $userInfo, $authority, $uri.PathAndQuery, $uri.Fragment
 }
 
@@ -300,7 +300,7 @@ elseif (-not $SkipTunnel) {
     $dotenvDatabaseUrl = Get-DotEnvValue -Path $envPath -Key "DATABASE_URL"
     if (-not [string]::IsNullOrWhiteSpace($dotenvDatabaseUrl)) {
         try {
-            $databaseUrlOverride = Update-DatabaseUrlPort -Url $dotenvDatabaseUrl -Host "localhost" -Port $LocalDbPort
+            $databaseUrlOverride = Update-DatabaseUrlPort -Url $dotenvDatabaseUrl -HostName "localhost" -Port $LocalDbPort
         }
         catch {
             Write-Log "Could not rewrite DATABASE_URL from .env; child processes will use the existing environment or .env as-is." "WARN"
@@ -342,7 +342,7 @@ if ($StartDownloader) {
     $services += New-ServiceDefinition `
         -Name "start_download" `
         -FilePath $resolvedPython `
-        -Arguments @((Join-Path $RepoRoot "start_download.py"), "--run-dir", $RunDir) + $DownloadArgs `
+        -Arguments (@((Join-Path $RepoRoot "start_download.py"), "--run-dir", $RunDir) + $DownloadArgs) `
         -WorkingDirectory $RepoRoot `
         -Description ("Downloader worker using run dir {0}" -f $RunDir)
 }
@@ -351,7 +351,7 @@ if ($StartBackupAndReap) {
     $services += New-ServiceDefinition `
         -Name "backup_and_reap" `
         -FilePath $resolvedPython `
-        -Arguments @((Join-Path $RepoRoot "backup_and_reap.py"), "--backup-dir", $BackupDir) + $BackupArgs `
+        -Arguments (@((Join-Path $RepoRoot "backup_and_reap.py"), "--backup-dir", $BackupDir) + $BackupArgs) `
         -WorkingDirectory $RepoRoot `
         -Description ("Backup/reap loop using backup dir {0}" -f $BackupDir)
 }
@@ -360,7 +360,7 @@ if ($StartArchiver) {
     $services += New-ServiceDefinition `
         -Name "start_archiver" `
         -FilePath $resolvedPython `
-        -Arguments @((Join-Path $RepoRoot "start_archiver.py"), "--run-dir", $RunDir, "--archive-dir", $ArchiveDir) + $ArchiverArgs `
+        -Arguments (@((Join-Path $RepoRoot "start_archiver.py"), "--run-dir", $RunDir, "--archive-dir", $ArchiveDir) + $ArchiverArgs) `
         -WorkingDirectory $RepoRoot `
         -Description ("Archiver using run dir {0} and archive dir {1}" -f $RunDir, $ArchiveDir)
 }
