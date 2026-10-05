@@ -155,6 +155,17 @@ def resolve_js_runtime(path_hint=""):
     return None
 
 
+def js_runtime_name(path):
+    """yt-dlp's name for the runtime at path: deno, node, bun or quickjs."""
+    name = (path or "").replace("\\", "/").rsplit("/", 1)[-1]
+    stem = os.path.splitext(name)[0].lower()
+    if stem in ("qjs", "quickjs"):
+        return "quickjs"
+    if stem in ("deno", "node", "bun"):
+        return stem
+    return "deno"
+
+
 def default_cookie_path(run_dir):
     return os.path.join(run_dir, DEFAULT_COOKIE_RELATIVE_PATH)
 
@@ -381,6 +392,10 @@ def initialize_worker_pipeline(
             f"Run: python setup_worker.py --run-dir \"{run_dir}\""
         )
 
+    # Read by the bgutil PO token script. Set once here instead of from every
+    # download thread.
+    os.environ["TOKEN_TTL"] = str(int(profile.get("token_ttl_hours", 6)))
+
     target_titles_per_hour = max(1, int(profile.get("target_titles_per_hour", 1200)))
     profile["global_min_start_interval_seconds"] = 3600.0 / target_titles_per_hour
 
@@ -606,8 +621,6 @@ def _cleanup_temp_dir(path):
 
 
 def _build_ydl_opts(profile, video_id, download_dir, cookie_file, verbose, player_clients, test):
-    os.environ["TOKEN_TTL"] = str(int(profile.get("token_ttl_hours", 6)))
-
     extractor_args = {
         "youtube": {
             "player_client": player_clients,
@@ -638,7 +651,7 @@ def _build_ydl_opts(profile, video_id, download_dir, cookie_file, verbose, playe
         "concurrent_fragment_downloads": int(profile.get("concurrent_fragment_downloads", 2)),
         "extractor_args": extractor_args,
         "js_runtimes": {
-            "deno": {
+            js_runtime_name(profile["js_runtime_path"]): {
                 "path": profile["js_runtime_path"],
             }
         },

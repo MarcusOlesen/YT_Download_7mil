@@ -6,14 +6,6 @@ from env_utils import load_env
 
 load_env()
 
-# Hardcode dataset totals to avoid reading the datasets table.
-DATASET_TOTALS = [
-    ("ids_ok_sorted", 5727606),
-    ("ids_no_uploadinfo", 1768),
-    ("ids_with_errors", 1264355),
-]
-
-
 def connect_db(db_url):
     conn = psycopg2.connect(db_url)
     conn.autocommit = True
@@ -43,30 +35,22 @@ def fetch_status_counts(conn):
     return counts
 
 
-def fetch_dataset_totals(conn):
-    if DATASET_TOTALS:
-        return [(name, idx, total) for idx, (name, total) in enumerate(DATASET_TOTALS)]
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT name, priority, total_count FROM datasets ORDER BY priority ASC"
-        )
-        rows = cur.fetchall()
-    return rows
-
-
-def fetch_dataset_done(conn):
+def fetch_dataset_progress(conn):
+    """(name, done, total) per dataset, counted from the videos table."""
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT dataset_name,
                    SUM(CASE WHEN status IN ('success','failure','skipped')
-                            THEN 1 ELSE 0 END) AS done
+                            THEN 1 ELSE 0 END) AS done,
+                   COUNT(*) AS total
             FROM videos
-            GROUP BY dataset_name
+            GROUP BY dataset_name, dataset_priority
+            ORDER BY dataset_priority
             """
         )
         rows = cur.fetchall()
-    return {row[0]: int(row[1] or 0) for row in rows}
+    return [(name, int(done or 0), int(total)) for name, done, total in rows]
 
 
 def fetch_active_workers(conn):
@@ -186,13 +170,10 @@ def main():
         )
     )
 
-    totals = fetch_dataset_totals(conn)
-    done_map = fetch_dataset_done(conn)
-    if totals:
+    progress = fetch_dataset_progress(conn)
+    if progress:
         print("Datasets:")
-        for name, _, total_count in totals:
-            total_count = int(total_count or 0)
-            done_count = int(done_map.get(name, 0))
+        for name, done_count, total_count in progress:
             pct = (done_count / total_count * 100.0) if total_count else 0.0
             print(f" {name}: \t{done_count}/{total_count} ({pct:.2f}%)")
 
