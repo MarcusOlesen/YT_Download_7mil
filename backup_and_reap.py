@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import glob
 import os
 import shutil
@@ -122,9 +122,12 @@ def main():
 
         if args.reap:
             conn = connect_db(db_url)
-            reaped = reap_expired_leases(conn)
+            reaped, failed = reap_expired_leases(conn)
             conn.close()
-            print(f"Reaped {reaped} expired leases.")
+            print(
+                f"Reaped {reaped + failed} expired leases "
+                f"({reaped} back to pending, {failed} out of attempts marked failure)."
+            )
 
         backup_path = run_backup(db_url, args.backup_dir, pg_dump_path)
         print(f"Backup created: {backup_path}")

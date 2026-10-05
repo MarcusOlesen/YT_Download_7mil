@@ -22,6 +22,27 @@ DEFAULT_DATASETS = [
 
 GLOBAL_COOLDOWN_META_KEY = "global_cooldown_until_utc"
 
+BOT_CHECK_PATTERN = re.compile(
+    r"^ERROR: \[youtube\] [A-Za-z0-9_-]{11}: Sign in to confirm you'?re not a bot\b",
+    re.IGNORECASE,
+)
+
+# A video that hits the bot check this many times is marked as a failure
+# instead of going back to pending, so the probe loop cannot get stuck on it.
+MAX_BLOCKS_PER_VIDEO = 10
+
+BATCH_STATUS_COLUMNS = {
+    "status",
+    "started_at",
+    "finished_at",
+    "success",
+    "failure",
+    "skipped",
+    "zip_path",
+    "archive_path",
+    "last_error",
+}
+
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
@@ -70,18 +91,9 @@ def is_bot_blocked_log(ytdlp_log):
     line = line.replace("’", "'").replace("‘", "'")
     line = line.replace("???", "'").replace("???", "'")
     line = line.replace("�", "'")
-    template = (
-        "ERROR: [youtube] {id}: Sign in to confirm you're not a bot. "
-        "Use --cookies-from-browser or --cookies for the authentication. "
-        "See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  "
-        "for how to manually pass cookies. Also see  "
-        "https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies  "
-        "for tips on effectively exporting YouTube cookies"
-    )
-    escaped = re.escape(template)
-    escaped = escaped.replace(re.escape("{id}"), r"[A-Za-z0-9_-]{11}")
-    pattern = re.compile(r"^" + escaped + r"$")
-    return bool(pattern.match(line))
+    # Only the start of yt-dlp's message is matched. The hints that follow it
+    # (cookie instructions and wiki links) change between yt-dlp releases.
+    return bool(BOT_CHECK_PATTERN.match(line))
 
 
 def atomic_write_text(text, path):
@@ -194,10 +206,26 @@ def create_schema(conn):
                     elapsed_sec REAL,
                     batch_id TEXT,
                     output_file TEXT,
-                    log_path TEXT
+                    log_path TEXT,
+                    blocked_count INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            # Databases created before blocked_count existed get the column
+            # here. The check avoids taking an exclusive lock on every start.
+            cur.execute(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'videos'
+                  AND column_name = 'blocked_count'
+                """
+            )
+            if cur.fetchone() is None:
+                cur.execute(
+                    "ALTER TABLE videos ADD COLUMN IF NOT EXISTS "
+                    "blocked_count INTEGER NOT NULL DEFAULT 0"
+                )
             cur.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_videos_claim
@@ -434,19 +462,44 @@ def ensure_db_ready(conn, batch_size, lease_seconds, max_attempts):
 
 
 def reap_expired_leases(conn):
+    """Release expired leases. Returns (back_to_pending, marked_failed).
+
+    A row that has used all its attempts is marked 'failure' instead of going
+    back to 'pending', where claim_videos would never pick it up again.
+    max_attempts is read from the meta table; without it every row goes back
+    to pending.
+    """
     with conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE videos
-                SET status = 'pending',
-                    worker_id = NULL,
-                    lease_until = NULL,
-                    batch_id = NULL
-                WHERE status = 'in_progress' AND lease_until < now()
+                WITH limits AS (
+                    SELECT COALESCE(
+                        (SELECT value::integer FROM meta WHERE key = 'max_attempts'),
+                        2147483647
+                    ) AS max_attempts
+                ),
+                expired AS (
+                    SELECT v.id, v.attempts >= limits.max_attempts AS exhausted
+                    FROM videos v, limits
+                    WHERE v.status = 'in_progress' AND v.lease_until < now()
+                    FOR UPDATE OF v SKIP LOCKED
+                )
+                UPDATE videos v
+                SET status = CASE WHEN expired.exhausted THEN 'failure' ELSE 'pending' END,
+                    worker_id = CASE WHEN expired.exhausted THEN v.worker_id END,
+                    batch_id = CASE WHEN expired.exhausted THEN v.batch_id END,
+                    last_error = CASE WHEN expired.exhausted THEN 'lease_expired' ELSE v.last_error END,
+                    end_time = CASE WHEN expired.exhausted THEN now() ELSE v.end_time END,
+                    lease_until = NULL
+                FROM expired
+                WHERE v.id = expired.id
+                RETURNING expired.exhausted
                 """
             )
-            return cur.rowcount
+            rows = cur.fetchall()
+    failed = sum(1 for (exhausted,) in rows if exhausted)
+    return len(rows) - failed, failed
 
 
 def claim_videos(
@@ -471,7 +524,6 @@ def claim_videos(
                     FROM videos
                     WHERE {status_clause}
                       AND attempts < %s
-                      AND (lease_until IS NULL OR lease_until < now())
                     ORDER BY dataset_priority ASC, row_index ASC
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
@@ -512,7 +564,6 @@ def claim_failed_from_batch(
                     WHERE batch_id = %s
                       AND status = 'failure'
                       AND attempts < %s
-                      AND (lease_until IS NULL OR lease_until < now())
                     FOR UPDATE SKIP LOCKED
                 )
                 UPDATE videos v
@@ -555,6 +606,9 @@ def create_batch_record(conn, batch_id, worker_id, total):
 def update_batch_status(conn, batch_id, fields):
     if not fields:
         return
+    unknown = set(fields) - BATCH_STATUS_COLUMNS
+    if unknown:
+        raise ValueError(f"Unknown batch columns: {sorted(unknown)}")
     columns = ", ".join(f"{key} = %s" for key in fields)
     values = list(fields.values()) + [batch_id]
     with conn:
@@ -600,6 +654,22 @@ def build_existing_map(videos_dir):
         video_id = name.split(".", 1)[0]
         existing[video_id] = os.path.join(videos_dir, name)
     return existing
+
+
+def build_run_dir_index(run_dir):
+    """Map video ID to file for every finished download under run_dir.
+
+    Covers all batches/<id>/videos folders and the probe folder, so a video
+    that comes back to this machine in a later batch is not downloaded again.
+    """
+    index = {}
+    batches_dir = os.path.join(run_dir, "batches")
+    if os.path.isdir(batches_dir):
+        for entry in os.scandir(batches_dir):
+            if entry.is_dir():
+                index.update(build_existing_map(os.path.join(entry.path, "videos")))
+    index.update(build_existing_map(os.path.join(run_dir, "probe")))
+    return index
 
 
 def find_existing_video(videos_dir, video_id):
@@ -677,13 +747,45 @@ def release_videos_to_pending(conn, worker_id, ids, decrement_attempts=True):
             return cur.rowcount
 
 
-def release_blocked_video(conn, worker_id, video_id):
-    return release_videos_to_pending(
-        conn,
-        worker_id,
-        [video_id],
-        decrement_attempts=False,
-    )
+def release_blocked_video(conn, worker_id, video_id, reason=None,
+                          max_blocks=MAX_BLOCKS_PER_VIDEO):
+    """Hand a bot-blocked video back to the queue.
+
+    A bot check is a temporary block on this machine's IP, not a problem with
+    the video, so the attempt is given back and the block is counted in
+    blocked_count instead. After max_blocks blocks the video is marked
+    'failure' so it cannot hold up the probe loop forever.
+    """
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE videos
+                SET status = CASE WHEN blocked_count + 1 >= %s
+                                  THEN 'failure' ELSE 'pending' END,
+                    worker_id = CASE WHEN blocked_count + 1 >= %s
+                                     THEN worker_id END,
+                    batch_id = CASE WHEN blocked_count + 1 >= %s
+                                    THEN batch_id END,
+                    lease_until = NULL,
+                    last_error = %s,
+                    start_time = NULL,
+                    end_time = NULL,
+                    elapsed_sec = NULL,
+                    attempts = GREATEST(attempts - 1, 0),
+                    blocked_count = blocked_count + 1
+                WHERE worker_id = %s AND id = %s
+                """,
+                (
+                    max_blocks,
+                    max_blocks,
+                    max_blocks,
+                    reason or "bot_check",
+                    worker_id,
+                    video_id,
+                ),
+            )
+            return cur.rowcount
 
 
 def update_video_result(conn, worker_id, result):
