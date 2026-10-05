@@ -20,6 +20,7 @@ All scripts read the database connection from `DATABASE_URL` in a `.env` file in
 - [Troubleshooting](#troubleshooting)
 - [Optional components](#optional-components)
 - [Reset database (destructive)](#reset-database-destructive)
+- [Updating an existing database](#updating-an-existing-database)
 - [Notes](#notes)
 
 ## Setup
@@ -316,6 +317,8 @@ One-time reap:
 python backup_and_reap.py --reap --once
 ```
 
+Rows whose lease expired on their last attempt are marked `failure` with `last_error = 'lease_expired'`; the others go back to `pending`. The output says how many of each.
+
 Note: there is no reap-only mode. Every pass also runs `pg_dump` (into `db_backups/` unless `--backup-dir` is given), so `pg_dump` must be installed even if you only want to reap. Without `--once` the script keeps looping.
 
 ## Status and monitoring
@@ -540,7 +543,12 @@ trust
 
 This allows connections without a password.
 
-This is safe because the database is **only reachable through the SSH tunnel**, which requires an SSH key.
+This is safe because the database is **only reachable through the SSH tunnel**. To open one you need:
+
+* the SSH port of the running job, which is different for every database job,
+* UCloud access, which requires 2FA,
+* an SSH key registered in UCloud,
+* personal access to the shared database folder in UCloud.
 
 ### 8. Start PostgreSQL
 
@@ -622,6 +630,8 @@ python start_archiver.py --run-dir "D:\yt_download_worker_a" --archive-dir "O:\A
 
 `dashboard.py` is still work in progress. Use the CLI scripts above as the primary and supported workflow.
 
+It needs `DATABASE_URL` (or a database URL entered in the page). It has no login and only accepts requests from the local machine (`http://127.0.0.1:8000` or `http://localhost:8000`).
+
 ## Reset database (destructive)
 
 ```powershell
@@ -629,6 +639,22 @@ python reset_database.py
 ```
 
 Use only when you need to wipe downloader state and start over.
+
+## Updating an existing database
+
+The first worker started with this version adds a `blocked_count` column to `videos` (a quick `ALTER TABLE`; later starts skip it). Nothing else needs to change.
+
+Older versions could leave rows stuck in `pending` with all attempts used: a bot check or an expired lease used up the attempt, and `claim_videos` never picks up such rows. They are counted as remaining in `get_status.py` forever. To find them (replace 3 with your `max_attempts`):
+
+```sql
+SELECT count(*) FROM videos WHERE status = 'pending' AND attempts >= 3;
+```
+
+Many of these are probably videos that hit bot checks rather than broken ones. To give them one more attempt:
+
+```sql
+UPDATE videos SET attempts = 3 - 1 WHERE status = 'pending' AND attempts >= 3;
+```
 
 ## Notes
 
