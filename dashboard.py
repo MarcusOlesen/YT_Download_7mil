@@ -6,6 +6,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 import psycopg2
 from fastapi import FastAPI, Request
@@ -16,10 +17,7 @@ from env_utils import load_env
 load_env()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DB_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:YouTube@localhost:5432/yt_downloads",
-)
+DEFAULT_DB_URL = os.getenv("DATABASE_URL", "")
 DEFAULT_ARCHIVE_DIR = os.path.join(BASE_DIR, "archive")
 DEFAULT_BACKUP_DIR = os.path.join(BASE_DIR, "DB_backup")
 DEFAULT_RUN_DIR = os.path.join(BASE_DIR, "run_local")
@@ -31,6 +29,33 @@ STATE = {
 }
 
 app = FastAPI()
+
+LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+
+
+def _hostname(value):
+    try:
+        return urlsplit(value if "//" in value else f"//{value}").hostname
+    except ValueError:
+        return None
+
+
+@app.middleware("http")
+async def local_requests_only(request: Request, call_next):
+    # The API starts and stops processes and has no login, so it only accepts
+    # requests addressed to localhost (blocks DNS rebinding), from a localhost
+    # page (blocks other sites in the same browser), and POSTs only as JSON
+    # (a cross-site page cannot send that without a CORS preflight).
+    if _hostname(request.headers.get("host", "")) not in LOCAL_HOSTNAMES:
+        return JSONResponse({"error": "Host not allowed"}, status_code=403)
+    origin = request.headers.get("origin")
+    if origin and _hostname(origin) not in LOCAL_HOSTNAMES:
+        return JSONResponse({"error": "Origin not allowed"}, status_code=403)
+    if request.method == "POST":
+        content_type = request.headers.get("content-type", "")
+        if not content_type.startswith("application/json"):
+            return JSONResponse({"error": "Expected application/json"}, status_code=415)
+    return await call_next(request)
 
 
 def utc_now_iso():
@@ -62,6 +87,8 @@ def parse_int(value, default, minimum=None):
 
 
 def connect_db(db_url):
+    if not db_url:
+        raise RuntimeError("No database URL. Set DATABASE_URL in .env or enter one.")
     conn = psycopg2.connect(db_url)
     conn.autocommit = True
     return conn
@@ -944,6 +971,8 @@ async def start_host(request: Request):
         payload = {}
 
     db_url = str(payload.get("db_url", DEFAULT_DB_URL)).strip() or DEFAULT_DB_URL
+    if not db_url:
+        return JSONResponse({"error": "db_url is required (or set DATABASE_URL)."}, status_code=400)
     backup_dir = str(payload.get("backup_dir", DEFAULT_BACKUP_DIR)).strip() or DEFAULT_BACKUP_DIR
     interval_minutes = parse_int(payload.get("interval_minutes", 60), 60, minimum=1)
     keep = parse_int(payload.get("keep", 3), 3, minimum=1)
@@ -990,6 +1019,8 @@ async def start_downloader(request: Request):
         payload = {}
 
     db_url = str(payload.get("db_url", DEFAULT_DB_URL)).strip() or DEFAULT_DB_URL
+    if not db_url:
+        return JSONResponse({"error": "db_url is required (or set DATABASE_URL)."}, status_code=400)
     run_dir = str(payload.get("run_dir", DEFAULT_RUN_DIR)).strip()
     worker_id = str(payload.get("worker_id", "")).strip()
 
@@ -1069,6 +1100,8 @@ async def start_archiver(request: Request):
 
     name = str(payload.get("name", "main")).strip() or "main"
     db_url = str(payload.get("db_url", DEFAULT_DB_URL)).strip() or DEFAULT_DB_URL
+    if not db_url:
+        return JSONResponse({"error": "db_url is required (or set DATABASE_URL)."}, status_code=400)
     run_dir = str(payload.get("run_dir", DEFAULT_RUN_DIR)).strip()
     archive_dir = str(payload.get("archive_dir", DEFAULT_ARCHIVE_DIR)).strip()
     poll_interval = parse_int(payload.get("poll_interval", 10), 10, minimum=1)

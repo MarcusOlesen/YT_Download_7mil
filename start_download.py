@@ -1,33 +1,21 @@
-﻿import argparse
-import json
+import argparse
 import os
 import socket
-import threading
 import time
-import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timezone
 
-from scraper_utils import initialize_worker_pipeline
 from terminal_logging import start_terminal_logging
 
 from distributed_core import (
-    build_existing_map,
+    build_run_dir_index,
     claim_videos,
-    connect_db,
     create_batch_record,
     create_run,
     download_one,
-    extend_batch_leases,
     ensure_db_ready,
-    extend_global_cooldown,
-    finish_run,
-    get_global_cooldown_until,
     get_batch_counts,
-    log_run_event,
-    record_run_error,
-    release_blocked_video,
     release_videos_to_pending,
     update_batch_status,
     update_video_result,
@@ -35,30 +23,21 @@ from distributed_core import (
     utc_now,
 )
 from env_utils import load_env
+from worker_common import (
+    DbSession,
+    compute_lease_heartbeat_interval,
+    configure_worker_pipeline,
+    finish_run_safely,
+    log_event,
+    probe_until_clear,
+    record_run_error_safely,
+    release_blocked,
+    resolve_worker_id,
+    start_lease_heartbeat,
+)
 
 load_env()
 
-
-def configure_worker_pipeline(run_dir, db_url):
-    def _read_shared_cooldown():
-        conn = connect_db(db_url)
-        try:
-            return get_global_cooldown_until(conn)
-        finally:
-            conn.close()
-
-    def _write_shared_cooldown(cooldown_seconds):
-        conn = connect_db(db_url)
-        try:
-            return extend_global_cooldown(conn, cooldown_seconds)
-        finally:
-            conn.close()
-
-    return initialize_worker_pipeline(
-        run_dir,
-        shared_cooldown_reader=_read_shared_cooldown,
-        shared_cooldown_writer=_write_shared_cooldown,
-    )
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -145,203 +124,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def resolve_worker_id(run_dir, worker_id_arg):
-    os.makedirs(run_dir, exist_ok=True)
-    path = os.path.join(run_dir, "worker_id.txt")
-    if worker_id_arg:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(worker_id_arg + "\n")
-        return worker_id_arg
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            value = f.read().strip()
-        if value:
-            return value
-    value = uuid.uuid4().hex
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(value + "\n")
-    return value
-
-
-
-
-def load_block_state(run_dir, default_wait_seconds):
-    os.makedirs(run_dir, exist_ok=True)
-    path = os.path.join(run_dir, "block_wait_state.json")
-    state = {}
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                state = json.load(f) or {}
-        except Exception:
-            state = {}
-    base_wait = int(state.get("base_wait_seconds", default_wait_seconds))
-    next_wait = int(state.get("next_wait_seconds", base_wait))
-    state["base_wait_seconds"] = max(1, base_wait)
-    state["next_wait_seconds"] = max(1, next_wait)
-    state["path"] = path
-    return state
-
-
-def save_block_state(state):
-    path = state.get("path")
-    if not path:
-        return
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump({k: v for k, v in state.items() if k != "path"}, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-
-
-def compute_lease_heartbeat_interval(lease_seconds):
-    interval = max(30, int(lease_seconds * 0.5))
-    if interval >= lease_seconds:
-        interval = max(1, lease_seconds - 1)
-    return interval
-
-
-
-
-def log_event(db_url, run_id, level, message):
-    conn = connect_db(db_url)
-    log_run_event(conn, run_id, level, message)
-    conn.close()
-
-
-def start_lease_heartbeat(
-    db_url, batch_id, worker_id, lease_seconds, interval_seconds, run_id
-):
-    stop_event = threading.Event()
-
-    def _loop():
-        while not stop_event.wait(interval_seconds):
-            try:
-                conn = connect_db(db_url)
-                extend_batch_leases(conn, batch_id, worker_id, lease_seconds)
-                conn.close()
-            except Exception as exc:
-                try:
-                    conn = connect_db(db_url)
-                    log_run_event(
-                        conn,
-                        run_id,
-                        "warn",
-                        f"Lease heartbeat failed for batch {batch_id}: {exc}",
-                    )
-                    conn.close()
-                except Exception:
-                    pass
-
-    thread = threading.Thread(target=_loop, daemon=True)
-    thread.start()
-    return stop_event, thread
-
-
-def probe_until_clear(db_url, worker_id, lease_seconds, max_attempts, run_id, args):
-    probe_batch_id = f"probe_{worker_id}"
-    state = load_block_state(args.run_dir, args.block_sleep_seconds)
-    current_wait = state.get("next_wait_seconds", args.block_sleep_seconds)
-
-    while True:
-        state["last_wait_started_at"] = utc_now()
-        save_block_state(state)
-        log_event(
-            db_url,
-            run_id,
-            "info",
-            f"Bot-check sleep for {current_wait}s before probing.",
-        )
-        print(f"[BOT-BLOCK] Sleeping {current_wait}s. Current time (UTC): {utc_now()}")
-        time.sleep(current_wait)
-        state["last_wait_ended_at"] = utc_now()
-        state["last_wait_seconds"] = int(current_wait)
-        save_block_state(state)
-
-        while True:
-            conn = connect_db(db_url)
-            ids = claim_videos(
-                conn,
-                worker_id,
-                probe_batch_id,
-                1,
-                False,
-                lease_seconds,
-                max_attempts,
-            )
-            conn.close()
-
-            if not ids:
-                log_event(
-                    db_url,
-                    run_id,
-                    "warn",
-                    "Probe: no pending videos to test; sleeping again.",
-                )
-                current_wait = max(1, int(current_wait * 1.5))
-                state["next_wait_seconds"] = current_wait
-                save_block_state(state)
-                break
-
-            video_id = ids[0]
-            print(f"[BOT-BLOCK] Probing video {video_id} at {utc_now()}")
-            probe_dir = os.path.join(args.run_dir, "probe")
-            probe_logs = os.path.join(args.run_dir, "probe_logs")
-            os.makedirs(probe_dir, exist_ok=True)
-            os.makedirs(probe_logs, exist_ok=True)
-            result = download_one(video_id, probe_dir, probe_logs, False)
-
-            if result["status"] == "blocked":
-                conn = connect_db(db_url)
-                release_blocked_video(conn, worker_id, video_id)
-                conn.close()
-                log_event(
-                    db_url,
-                    run_id,
-                    "warn",
-                    "Probe: bot-check still active; sleeping again.",
-                )
-                print(f"[BOT-BLOCK] Probe blocked; next sleep {current_wait}s")
-                current_wait = max(1, int(current_wait * 1.5))
-                state["next_wait_seconds"] = current_wait
-                save_block_state(state)
-                break
-
-            if result["status"] == "success" and result.get("output_file"):
-                conn = connect_db(db_url)
-                update_video_result(conn, worker_id, result)
-                conn.close()
-                next_base = max(1, int(current_wait * 0.8))
-                state["base_wait_seconds"] = next_base
-                state["next_wait_seconds"] = next_base
-                save_block_state(state)
-                log_event(
-                    db_url,
-                    run_id,
-                    "info",
-                    f"Probe success; resuming downloads. Next base wait={next_base}s.",
-                )
-                print(f"[BOT-BLOCK] Probe success; resuming. Next base wait {next_base}s")
-                return
-
-            # Non-bot error: record and try another probe video immediately
-            conn = connect_db(db_url)
-            update_video_result(conn, worker_id, result)
-            conn.close()
-            log_event(
-                db_url,
-                run_id,
-                "warn",
-                f"Probe non-bot error for {video_id}; trying another video.",
-            )
-            print(f"[BOT-BLOCK] Probe non-bot error for {video_id}; trying another.")
-            time.sleep(1)
-
 
 def main():
     args = parse_args()
@@ -359,9 +141,8 @@ def main():
     if not db_url:
         raise SystemExit("Missing --db-url or DATABASE_URL.")
 
-    conn = connect_db(db_url)
-    ensure_db_ready(conn, args.batch_size, args.lease_seconds, args.max_attempts)
-    conn.close()
+    db = DbSession(db_url)
+    db.run(ensure_db_ready, args.batch_size, args.lease_seconds, args.max_attempts)
 
     try:
         profile = configure_worker_pipeline(args.run_dir, db_url)
@@ -380,9 +161,8 @@ def main():
     )
     host = socket.gethostname()
     pid = os.getpid()
-    conn = connect_db(db_url)
-    create_run(
-        conn,
+    db.run(
+        create_run,
         run_id,
         args.worker_id,
         "start_download",
@@ -395,8 +175,8 @@ def main():
         args.lease_seconds,
         args.max_attempts,
     )
-    log_run_event(
-        conn,
+    log_event(
+        db,
         run_id,
         "info",
         (
@@ -406,7 +186,6 @@ def main():
             f"overlap_batches={args.overlap_batches}"
         ),
     )
-    conn.close()
 
     batches_dir = os.path.join(args.run_dir, "batches")
     os.makedirs(batches_dir, exist_ok=True)
@@ -423,15 +202,17 @@ def main():
 
     try:
         heartbeat_interval = compute_lease_heartbeat_interval(args.lease_seconds)
+        # Files already downloaded anywhere in this run dir, so a video that
+        # comes back to this machine is not downloaded twice.
+        existing_index = build_run_dir_index(args.run_dir)
+        print(f"Found {len(existing_index)} downloaded files in {args.run_dir}.")
 
         def mark_no_more_videos():
             nonlocal no_more_logged
             if no_more_logged:
                 return
             print("No more videos to claim.")
-            conn = connect_db(db_url)
-            log_run_event(conn, run_id, "info", "No more videos to claim.")
-            conn.close()
+            log_event(db, run_id, "info", "No more videos to claim.")
             no_more_logged = True
 
         def claim_new_batch():
@@ -444,16 +225,13 @@ def main():
                 no_more_to_claim = True
                 if not max_batches_logged:
                     print("Reached max batches for this run.")
-                    conn = connect_db(db_url)
-                    log_run_event(conn, run_id, "info", "Reached max batches for this run.")
-                    conn.close()
+                    log_event(db, run_id, "info", "Reached max batches for this run.")
                     max_batches_logged = True
                 return None
 
             batch_id = next_batch_id(args.run_dir, args.worker_id)
-            conn = connect_db(db_url)
-            ids = claim_videos(
-                conn,
+            ids = db.run(
+                claim_videos,
                 args.worker_id,
                 batch_id,
                 args.batch_size,
@@ -461,7 +239,6 @@ def main():
                 args.lease_seconds,
                 args.max_attempts,
             )
-            conn.close()
 
             if not ids:
                 no_more_to_claim = True
@@ -470,9 +247,7 @@ def main():
 
             batches_claimed += 1
 
-            conn = connect_db(db_url)
-            create_batch_record(conn, batch_id, args.worker_id, len(ids))
-            conn.close()
+            db.run(create_batch_record, batch_id, args.worker_id, len(ids))
 
             stop_event, heartbeat_thread = start_lease_heartbeat(
                 db_url,
@@ -482,14 +257,12 @@ def main():
                 heartbeat_interval,
                 run_id,
             )
-            conn = connect_db(db_url)
-            log_run_event(
-                conn,
+            log_event(
+                db,
                 run_id,
                 "info",
                 f"Lease heartbeat every {heartbeat_interval}s for batch {batch_id}.",
             )
-            conn.close()
 
             batch_dir = os.path.join(batches_dir, batch_id)
             videos_dir = os.path.join(batch_dir, "videos")
@@ -497,14 +270,12 @@ def main():
             os.makedirs(videos_dir, exist_ok=True)
             os.makedirs(logs_dir, exist_ok=True)
 
-            existing_map = build_existing_map(videos_dir)
             ids_to_download = []
             for video_id in ids:
-                existing_file = existing_map.get(video_id)
-                if existing_file:
-                    conn = connect_db(db_url)
-                    update_video_result(
-                        conn,
+                existing_file = existing_index.get(video_id)
+                if existing_file and os.path.exists(existing_file):
+                    db.run(
+                        update_video_result,
                         args.worker_id,
                         {
                             "id": video_id,
@@ -515,7 +286,6 @@ def main():
                             "log_path": None,
                         },
                     )
-                    conn.close()
                     continue
                 ids_to_download.append(video_id)
 
@@ -574,6 +344,7 @@ def main():
                 selected["started_ids"].add(vid)
                 selected["in_flight"] += 1
 
+
         def finish_batch(state):
             nonlocal pending_probe
             batch_id = state["batch_id"]
@@ -581,19 +352,16 @@ def main():
             if state["blocked_triggered"] and has_unscheduled:
                 not_started = state["ids_to_download"][state["next_index"] :]
                 if not_started:
-                    conn = connect_db(db_url)
-                    release_videos_to_pending(conn, args.worker_id, not_started)
-                    conn.close()
+                    db.run(release_videos_to_pending, args.worker_id, not_started)
 
             state["stop_event"].set()
             state["heartbeat_thread"].join(timeout=10)
 
-            conn = connect_db(db_url)
-            counts = get_batch_counts(conn, batch_id)
+            counts = db.run(get_batch_counts, batch_id)
             status_value = "paused" if state["blocked_triggered"] else "downloaded"
             last_error = "bot_check_threshold" if state["blocked_triggered"] else None
-            update_batch_status(
-                conn,
+            db.run(
+                update_batch_status,
                 batch_id,
                 {
                     "status": status_value,
@@ -604,21 +372,18 @@ def main():
                     "last_error": last_error,
                 },
             )
-            conn.close()
 
             print(
                 f"{batch_id} done: success={counts.get('success', 0)} "
                 f"failure={counts.get('failure', 0)} skipped={counts.get('skipped', 0)}"
             )
-            conn = connect_db(db_url)
-            log_run_event(
-                conn,
+            log_event(
+                db,
                 run_id,
                 "info",
                 f"Batch {batch_id} done: success={counts.get('success', 0)} "
                 f"failure={counts.get('failure', 0)} skipped={counts.get('skipped', 0)}",
             )
-            conn.close()
 
             if state["blocked_triggered"]:
                 pending_probe = True
@@ -656,11 +421,9 @@ def main():
 
                         if result["status"] == "blocked":
                             state["consecutive_blocked"] += 1
-                            conn = connect_db(db_url)
-                            release_blocked_video(conn, args.worker_id, vid)
-                            conn.close()
+                            release_blocked(db, args.worker_id, vid, result)
                             log_event(
-                                db_url,
+                                db,
                                 run_id,
                                 "warn",
                                 (
@@ -674,9 +437,9 @@ def main():
                             )
                         else:
                             state["consecutive_blocked"] = 0
-                            conn = connect_db(db_url)
-                            update_video_result(conn, args.worker_id, result)
-                            conn.close()
+                            db.run(update_video_result, args.worker_id, result)
+                            if result["status"] == "success" and result.get("output_file"):
+                                existing_index[vid] = result["output_file"]
 
                         if (
                             not state["blocked_triggered"]
@@ -684,7 +447,7 @@ def main():
                         ):
                             state["blocked_triggered"] = True
                             log_event(
-                                db_url,
+                                db,
                                 run_id,
                                 "error",
                                 (
@@ -698,12 +461,13 @@ def main():
 
                 if pending_probe and not active_batch_order and not in_flight:
                     probe_until_clear(
-                        db_url,
+                        db,
                         args.worker_id,
                         args.lease_seconds,
                         args.max_attempts,
                         run_id,
                         args,
+                        existing_index,
                     )
                     pending_probe = False
                     if not (args.max_batches and batches_claimed >= args.max_batches):
@@ -718,14 +482,10 @@ def main():
 
     except KeyboardInterrupt:
         run_status = "interrupted"
-        conn = connect_db(db_url)
-        record_run_error(conn, run_id, "KeyboardInterrupt")
-        conn.close()
+        record_run_error_safely(db, run_id, "KeyboardInterrupt")
     except Exception as exc:
         run_status = "failed"
-        conn = connect_db(db_url)
-        record_run_error(conn, run_id, f"Unhandled exception: {exc}")
-        conn.close()
+        record_run_error_safely(db, run_id, f"Unhandled exception: {exc}")
         raise
     finally:
         for state in list(active_batches.values()):
@@ -738,14 +498,9 @@ def main():
                 state["heartbeat_thread"].join(timeout=10)
             except Exception:
                 pass
-        conn = connect_db(db_url)
-        finish_run(conn, run_id, run_status)
-        conn.close()
+        finish_run_safely(db, run_id, run_status)
+        db.close()
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
